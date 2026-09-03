@@ -1,0 +1,138 @@
+Bollettino Meteo
+BOLLETTINO N°
+
+DATA EMISSIONE
+
+VALIDITÀ
+
+AGGIORNAMENTO
+
+SERVIZIO A CURA DI
+
+AMBITO
+
+278/2026
+
+01/09/2026 ore 14:00
+
+84 ore
+
+02/09/2026 ore 14:00
+
+Dipartimento Rischi Naturali ed Ambientali
+
+Regione Piemonte
+
+Situazione ed evoluzione
+Sul Mediterraneo persiste un'area di alta pressione, che mantiene condizioni di tempo stabile e soleggiato sul Piemonte. Nel corso del pomeriggio
+odierno, il transito di una debole ondulazione in quota potrà tuttavia favorire lo sviluppo di qualche isolato rovescio sui rilievi settentrionali e meridionali
+della regione. A partire da domani, l’anticiclone tenderà a rafforzarsi ulteriormente, garantendo cieli prevalentemente sereni e un progressivo aumento
+delle temperature. I valori massimi arriveranno a superare i 30 °C in pianura, portandosi su livelli superiori alla media del periodo. In aumento anche i
+valori dello zero termico, atteso fino a 4700-4800 m a sud nella giornata di giovedì.
+
+martedì, 01 settembre 2026
+Notte/Mattina
+
+Pomeriggio/Sera
+
+Attendibilità: 95%
+Nuvolosità: cielo sereno o poco nuvoloso, con nubi sparse sul Piemonte orientale,
+più compatte in serata.
+Precipitazioni: locali deboli rovesci a ridosso delle Alpi settentrionali e
+dell'Appennino.
+Zero termico: in lieve calo fino ai 3900-4000 m a nord e 4200 m a sud.
+Venti: deboli a tutte le quote, occidentali sulle Alpi, tra est e nordest sull'Appennino
+e in pianura, con locali rinforzi.
+
+°C Min Max
+
+AL 19 31
+AT 16 32
+BI 21 29
+CN 19 29
+NO 20 30
+TO 18 32
+VB 20 29
+VC 15 31
+700 17 27
+1500 13 20
+2000 9 18
+0° 4100m
+
+mercoledì, 02 settembre 2026
+Notte/Mattina
+
+Pomeriggio/Sera
+
+Attendibilità: 90%
+Nuvolosità: cielo soleggiato sulle Alpi e parzialmente nuvoloso altrove per
+addensamenti in progressivo dissolvimento in mattinata. Velato nel pomeriggio.
+Precipitazioni: assenti salvo possibili deboli isolati rovesci a ridosso dei settori
+alpini.
+Zero termico: in progressivo aumento nel corso della giornata fino a 4100-4200 m
+a nord e 4400-4500 m a sud.
+Venti: deboli o moderati da ovest sulle Alpi, in rotazione da nordovest nel
+pomeriggio; deboli sull'Appennino, da nordest al mattino in successiva rotazione
+dai quadranti meridionali. Deboli variabili in pianura. Locali rinforzi nelle vallate per
+foehn.
+
+giovedì, 03 settembre 2026
+Notte/Mattina
+
+Pomeriggio/Sera
+
+°C Min Max
+
+AL 19 33
+AT 17 33
+BI 20 30
+CN 18 29
+NO 22 30
+TO 20 33
+VB 21 29
+VC 17 31
+700 17 27
+1500 14 21
+2000 11 19
+0° 4200m
+
+Attendibilità: 80%
+Nuvolosità: cielo sereno.
+Precipitazioni: assenti.
+Zero termico: in marcato aumento nel corso della giornata sui 4600-4700 m, in
+ulteriore aumento fino a 4800 m in serata, valori elevati per il periodo.
+Venti: deboli localmente moderati da nordovest sulle Alpi e deboli settentrionali
+sull'Appennino. In pianura deboli variabili. Locali rinforzi per foehn nelle vallate
+alpine.
+
+°C Min Max
+
+AL 18 33
+AT 16 34
+BI 21 32
+CN 19 31
+NO 21 32
+TO 18 34
+VB 19 30
+VC 18 32
+700 18 29
+1500 15 23
+2000 11 21
+0° 4600m
+
+Tendenza per venerdì, 04 settembre 2026
+
+Attendibilità: 70%
+
+Nuvolosità: cielo sereno.
+Precipitazioni: assenti.
+Zero termico: stazionario sui 4600-4800 m.
+Venti: sulle Alpi deboli da nordovest al mattino, in rotazione da ovest nel pomeriggio. Sull'Appennino e sulle pianure centrali deboli dai
+quadranti meridionali con locali rinforzi, variabili altrove.
+
+°C Min Max
+0° 4700m
+
+www.arpa.piemonte.it
+
+

@@ -1,0 +1,758 @@
+{
+  "name": "Bollettino Meteo su Richiesta (v3)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 3
+            }
+          ]
+        }
+      },
+      "id": "3e403530-7832-593e-ac35-d6fdf39468b0",
+      "name": "Poll Telegram",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1500,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// 0. CONFIG — segreti, località e impostazioni\n// ============================================================================\n// Ordine di priorità: variabile d'ambiente -> valore scritto qui sotto.\n//   TELEGRAM_BOT_TOKEN=123456:AA...   GEMINI_API_KEY=AQ...\n//   EMAIL_MITTENTE=tua_email@esempio.com\n// Su n8n Cloud $env è bloccato: incolla i valori nei fallback.\n// ============================================================================\n\nfunction env(name) {\n  try {\n    return ($env && $env[name]) ? String($env[name]) : '';\n  } catch (e) {\n    return ''; // accesso a $env disabilitato\n  }\n}\n\nconst TELEGRAM_BOT_TOKEN = env('TELEGRAM_BOT_TOKEN') || 'INCOLLA_QUI_IL_TOKEN_TELEGRAM';\nconst GEMINI_API_KEY     = env('GEMINI_API_KEY')     || 'INCOLLA_QUI_LA_API_KEY_GEMINI';\n\n// Chi può chiedere il bollettino. [] = chiunque (sconsigliato: chiunque\n// conosca il bot può far partire mail verso indirizzi arbitrari dal tuo SMTP).\nconst ALLOWED_CHAT_IDS = [];\n\n// ---------------------------------------------------------------------------\n// PROFILI — decidono variabili scaricate, fenomeni calcolati e quarta casella\n// della mail. La convezione (CAPE + shear) si calcola sempre, ovunque.\n// ---------------------------------------------------------------------------\nconst PROFILI = {\n  costa:      { fenomeni: [],                                           riquadro: 'mare' },\n  pianura:    { fenomeni: ['nebbia', 'inversione', 'foehn'],             riquadro: 'visibilita' },\n  montagna:   { fenomeni: ['neve', 'foehn'],                             riquadro: 'neve' },\n  fondovalle: { fenomeni: ['nebbia', 'inversione', 'foehn', 'neve'],     riquadro: 'neve' }\n};\n\nconst cfg = {\n  telegram_token: TELEGRAM_BOT_TOKEN,\n  gemini_api_key: GEMINI_API_KEY,\n\n  // Flash Lite è il modello PRIMARIO: 500 richieste/giorno contro le 20 di\n  // 3.7 Flash, che resta cablato come fallback sull'Agente Capo.\n  gemini_model_micro: 'gemini-3.5-flash-lite',\n  gemini_timeout_ms: 120000,\n  gemini_max_output_tokens: 4096,\n  gemini_retry: 2,\n\n  allowed_chat_ids: ALLOWED_CHAT_IDS,\n  max_destinatari: 5,\n  // Casella SMTP da cui parte la mail (compare come mittente e in To:).\n  email_mittente: env('EMAIL_MITTENTE') || 'tua_email@esempio.com',\n  forecast_days: 4,\n\n  // Oltre queste ore il bollettino ufficiale in tabella è considerato vecchio\n  // e la mail lo segnala (senza bloccare l'invio).\n  ore_max_bollettino: 30,\n\n  profili: PROFILI,\n\n  citta: [\n    { id: 'bordighera', nome: 'Bordighera', lat: 43.7794, lon: 7.6697, quota: 10,\n      regione: 'liguria', rif: 'Imperia', zona_mare: 'ponente', profilo: 'costa',\n      alias: ['bordighera', 'bordi'] },\n\n    { id: 'genova', nome: 'Genova Centro', lat: 44.4056, lon: 8.9463, quota: 20,\n      regione: 'liguria', rif: 'Genova', zona_mare: 'centro', profilo: 'costa',\n      alias: ['genova', 'genova centro', 'genoa', 'ge'] },\n\n    { id: 'limone', nome: 'Limone Piemonte', lat: 44.2017, lon: 7.5769, quota: 1010,\n      regione: 'piemonte', rif: 'CN', profilo: 'montagna',\n      alias: ['limone', 'limone piemonte'] },\n\n    { id: 'torino', nome: 'Torino', lat: 45.0703, lon: 7.6869, quota: 239,\n      regione: 'piemonte', rif: 'TO', profilo: 'pianura',\n      alias: ['torino', 'turin', 'to'] },\n\n    { id: 'garessio', nome: 'Garessio', lat: 44.2033, lon: 8.0203, quota: 621,\n      regione: 'piemonte', rif: 'CN', profilo: 'fondovalle',\n      alias: ['garessio', 'val tanaro'] }\n  ]\n};\n\ncfg._warnings = [];\nif (cfg.telegram_token.startsWith('INCOLLA_QUI')) cfg._warnings.push('Token Telegram non configurato');\nif (cfg.gemini_api_key.startsWith('INCOLLA_QUI')) cfg._warnings.push('API key Gemini non configurata');\nif (!cfg.allowed_chat_ids.length) cfg._warnings.push('allowed_chat_ids vuoto: il bot risponde a CHIUNQUE');\nif (cfg.email_mittente.endsWith('@esempio.com')) cfg._warnings.push('email_mittente non configurata');\n\nreturn [{ json: cfg }];"
+      },
+      "id": "649d47da-01d1-5c6b-9d20-0d27ee4562af",
+      "name": "0. Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1290,
+        400
+      ],
+      "notes": "Token, API key, località e profili: tutto qui.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Offset di polling Telegram (memorizzato nello static data del workflow)\n// ============================================================================\n// ATTENZIONE: $getWorkflowStaticData viene salvato SOLO nelle esecuzioni di\n// produzione (workflow attivo). Nei test manuali l'offset non avanza e vedrai\n// sempre gli stessi update: è normale, non è un bug.\n//\n// NB: qui non c'è (più) nessun controllo basato sull'orario. Una versione\n// precedente teneva un \"telegramStartTime\" impostato al momento del primo\n// poll schedulato: siccome lo Schedule Trigger non scatta subito\n// all'attivazione (aspetta il primo tick, fino a 3 minuti), un messaggio\n// mandato subito dopo aver attivato il workflow arrivava con una data\n// precedente a quella soglia e veniva scartato per sempre. Il filtro\n// \"solo il nuovo\" ora si basa unicamente sull'offset di Telegram, gestito\n// in \"Only /start\": è la stessa API a garantire che un update_id già\n// consumato non venga mai ripresentato, senza bisogno dell'orologio.\n// ============================================================================\n\nconst data = $getWorkflowStaticData('global');\n\nreturn [{\n  json: {\n    offset: Number.isInteger(data.telegramOffset) ? data.telegramOffset : 0\n  }\n}];"
+      },
+      "id": "5830387f-84cf-59b0-a3d5-eeaf043b8e96",
+      "name": "Get Offset",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1080,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.telegram.org/bot' + $('0. Config').first().json.telegram_token + '/getUpdates' }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "offset",
+              "value": "={{ $json.offset ?? 0 }}"
+            },
+            {
+              "name": "timeout",
+              "value": "0"
+            },
+            {
+              "name": "allowed_updates",
+              "value": "[\"message\"]"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "7ee21ba3-086e-5667-8a34-3a7bd6262dd6",
+      "name": "Telegram getUpdates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -870,
+        400
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// LEGGI RICHIESTA — dal messaggio Telegram a { destinatari, località }\n// ============================================================================\n// Formato atteso:  <email> <località>\n//   mario@esempio.it limone piemonte\n//   a@b.com, c@d.it garessio\n//\n// I token che contengono \"@\" sono email, tutto il resto unito è il nome della\n// località: così funzionano sia più destinatari sia i nomi di due parole.\n//\n// Le richieste malformate NON vengono buttate via in silenzio: escono con un\n// campo `errore` e un nodo a valle risponde su Telegram.\n// ============================================================================\n\nconst cfg = $('0. Config').first().json;\nconst data = $getWorkflowStaticData('global');\n\nconst updates = Array.isArray($json.result) ? $json.result : [];\nif (updates.length === 0) return [];\n\n// Avanza sempre l'offset, anche per i messaggi che scarteremo.\nconst maxUpdateId = updates.reduce((max, u) => Math.max(max, Number(u.update_id) || 0), 0);\nif (maxUpdateId > 0) data.telegramOffset = maxUpdateId + 1;\n\n// Primissima esecuzione: la coda accumulata su Telegram fa da baseline e non\n// viene processata. Da qui in poi basta l'offset. (Nessun controllo a orologio:\n// aveva una finestra morta all'attivazione.)\nif (!data.telegramInitialized) {\n  data.telegramInitialized = true;\n  return [];\n}\n\nconst allowed = (cfg.allowed_chat_ids || []).map(Number);\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[a-z]{2,}$/i;\n\nconst out = [];\n\nfor (const u of updates) {\n  const msg = u.message;\n  if (!msg) continue;\n\n  const chatId = Number(msg.chat?.id);\n  if (allowed.length > 0 && !allowed.includes(chatId)) continue;\n\n  const text = String(msg.text || '').trim();\n  if (!text) continue;\n\n  // I comandi non sono richieste di bollettino: ignorati senza risposta.\n  if (text.startsWith('/')) continue;\n\n  const base = {\n    text,\n    chat_id: chatId,\n    user_id: msg.from?.id,\n    username: msg.from?.username ?? null,\n    update_id: u.update_id\n  };\n\n  const token = text.split(/[\\s,;]+/).map(t => t.trim()).filter(Boolean);\n  const grezzeEmail = token.filter(t => t.includes('@'));\n  const restanti = token.filter(t => !t.includes('@'));\n\n  const emails = [...new Set(grezzeEmail.map(e => e.toLowerCase()))];\n  const nonValide = emails.filter(e => !emailRegex.test(e));\n\n  if (!emails.length) {\n    out.push({ json: { ...base, errore: 'nessuna_email' } });\n    continue;\n  }\n  if (nonValide.length) {\n    out.push({ json: { ...base, errore: 'email_non_valida', dettaglio: nonValide.join(', ') } });\n    continue;\n  }\n\n  const localita = restanti.join(' ').trim();\n  if (!localita) {\n    out.push({ json: { ...base, errore: 'localita_mancante' } });\n    continue;\n  }\n\n  out.push({\n    json: {\n      ...base,\n      emails: emails.slice(0, cfg.max_destinatari || 5),\n      scartati: Math.max(0, emails.length - (cfg.max_destinatari || 5)),\n      localita_richiesta: localita,\n      errore: null\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "6a299f6a-c61d-5610-9b05-a3831a79ddfa",
+      "name": "Leggi Richiesta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -660,
+        400
+      ],
+      "notes": "Formato: <email> <località>"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// RISOLVI LOCALITÀ\n// ============================================================================\n// Abbina il testo scritto dall'utente a una delle località configurate.\n// Confronto insensibile a maiuscole, accenti e punteggiatura, prima esatto e\n// poi per prefisso (\"limone\" trova \"Limone Piemonte\").\n//\n// Se non si risolve, l'item prosegue con `errore` e il nodo IF a valle lo manda\n// alla risposta Telegram invece che nella pipeline.\n// ============================================================================\n\nconst cfg = $('0. Config').first().json;\nconst citta = cfg.citta || [];\nconst profili = cfg.profili || {};\n\n// \"Limone Piemonte\" -> \"limone piemonte\";  \"Città\" -> \"citta\"\nfunction normalizza(s) {\n  return String(s || '')\n    .toLowerCase()\n    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/[^a-z0-9 ]/g, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst indice = citta.map(c => ({\n  citta: c,\n  chiavi: [...new Set([c.id, c.nome, ...(c.alias || [])].map(normalizza))]\n}));\n\nconst elenco = citta.map(c => c.nome).join(', ');\n\n// ---------------------------------------------------------------------------\n// Variabili da chiedere a Open-Meteo: si scarica SOLO quello che il profilo\n// userà davvero. Costruirle qui tiene il nodo HTTP con una espressione banale.\n// ---------------------------------------------------------------------------\nconst BASE = [\n  'temperature_2m', 'apparent_temperature', 'relative_humidity_2m',\n  'cloud_cover', 'cloud_cover_high',\n  'precipitation', 'precipitation_probability',\n  'wind_speed_10m', 'wind_gusts_10m', 'wind_direction_10m',\n  'cape', 'convective_inhibition',\n  'temperature_850hPa', 'geopotential_height_500hPa', 'temperature_500hPa',\n  // servono per lo shear, che si valuta ovunque\n  'wind_speed_500hPa', 'wind_direction_500hPa'\n];\n\nfunction variabiliPer(fen) {\n  const extra = [];\n  if (fen.includes('nebbia') || fen.includes('inversione')) extra.push('dew_point_2m', 'visibility');\n  if (fen.includes('foehn')) extra.push('wind_speed_850hPa', 'wind_direction_850hPa');\n  if (fen.includes('neve')) extra.push('snowfall', 'snow_depth', 'freezing_level_height');\n  return [...new Set([...BASE, ...extra])].join(',');\n}\n\nreturn $input.all().map(item => {\n  const j = item.json;\n\n  // Errori già rilevati a monte (email mancante, ecc.): si passa oltre.\n  if (j.errore) return { json: { ...j, elenco_localita: elenco } };\n\n  const cercata = normalizza(j.localita_richiesta);\n\n  let trovata = indice.find(e => e.chiavi.includes(cercata));\n  if (!trovata) trovata = indice.find(e => e.chiavi.some(k => k.startsWith(cercata) && cercata.length >= 3));\n  if (!trovata) trovata = indice.find(e => e.chiavi.some(k => cercata.startsWith(k)));\n\n  if (!trovata) {\n    return { json: { ...j, errore: 'localita_sconosciuta', elenco_localita: elenco } };\n  }\n\n  const c = trovata.citta;\n  const profilo = profili[c.profilo] || { fenomeni: [], riquadro: 'mare' };\n\n  return {\n    json: {\n      ...j,\n      errore: null,\n      elenco_localita: elenco,\n      citta: c,\n      citta_id: c.id,\n      regione: c.regione,\n      // La convezione si valuta ovunque; il resto dipende dal profilo.\n      fenomeni: profilo.fenomeni,\n      riquadro: profilo.riquadro,\n      hourly: variabiliPer(profilo.fenomeni)\n    }\n  };\n});"
+      },
+      "id": "ee2c135c-3e81-5cef-9c40-1713e7f713da",
+      "name": "Risolvi Località",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -450,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "senza-errore",
+              "leftValue": "={{ $json.errore }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "c1c624cd-9735-5049-8c6f-4ff958340177",
+      "name": "Richiesta Valida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -240,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// MESSAGGIO DI ERRORE PER TELEGRAM\n// ============================================================================\n// Senza questo ramo una richiesta malformata sparisce nel nulla e chi scrive\n// non capisce se il bot sia vivo.\n// ============================================================================\n\nreturn $input.all().map(item => {\n  const j = item.json;\n  const elenco = j.elenco_localita || '';\n\n  let testo;\n  switch (j.errore) {\n    case 'nessuna_email':\n      testo = '❌ Non ho trovato un indirizzo email nel messaggio.\\n\\n' +\n              'Scrivimi così:\\n<email> <località>\\n\\n' +\n              'Esempio: mario@esempio.it garessio';\n      break;\n    case 'email_non_valida':\n      testo = `❌ Indirizzo non valido: ${j.dettaglio}\\n\\n` +\n              'Controlla e riprova con: <email> <località>';\n      break;\n    case 'localita_mancante':\n      testo = '❌ Manca la località.\\n\\n' +\n              'Scrivimi così:\\n<email> <località>\\n\\n' +\n              `Località disponibili: ${elenco}`;\n      break;\n    case 'localita_sconosciuta':\n      testo = `❌ Non conosco la località \"${j.localita_richiesta}\".\\n\\n` +\n              `Località disponibili: ${elenco}`;\n      break;\n    default:\n      testo = '❌ Non sono riuscito a interpretare la richiesta.\\n\\n' +\n              `Scrivimi: <email> <località>\\n\\nLocalità disponibili: ${elenco}`;\n  }\n\n  return { json: { chat_id: j.chat_id, testo } };\n});"
+      },
+      "id": "6ec4ed87-aae1-55cd-8bf4-d7aeeaeb7632",
+      "name": "Messaggio di Errore",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -30,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $('0. Config').first().json.telegram_token + '/sendMessage' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, text: $json.testo }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "2801a232-6bfe-5169-84e8-612ccea98bc4",
+      "name": "Avvisa su Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        620
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bollettini"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "regione",
+              "condition": "eq",
+              "keyValue": "={{ $json.regione }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
+      },
+      "id": "32e7dcf1-b014-595c-a114-e087957b15ae",
+      "name": "Leggi Bollettino Ufficiale",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -30,
+        300
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "Scritta dal workflow 'Aggiorna Bollettini Ufficiali'."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// PREPARA BOLLETTINO UFFICIALE\n// ============================================================================\n// Prende la riga letta dalla Data table (una per regione, scritta dal workflow\n// \"Aggiorna Bollettini Ufficiali\") e la adatta alla città richiesta:\n//\n//  - rigenera il testo `clean` tenendo SOLO il riferimento della città\n//    (per Torino la sigla TO, non tutte e otto le province: sono token sprecati\n//    che confondono il modello)\n//  - valuta la freschezza: oltre `ore_max_bollettino` la mail lo segnala\n//  - se la riga manca si prosegue coi soli modelli, senza bloccare la mail\n// ============================================================================\n\nconst cfg = $('0. Config').first().json;\nconst richiesta = $('Risolvi Località').first().json;\nconst citta = richiesta.citta;\n\nconst riga = $input.first().json || {};\n\nconst esito = {\n  ...richiesta,\n  ufficiale_ok: false,\n  ufficiale_nome: null,\n  ufficiale_numero: null,\n  ufficiale_emissione: null,\n  ufficiale_by_date: {},\n  ufficiale_tendenza: {},\n  ufficiale_clean: '(fonte ufficiale non disponibile in questa esecuzione)',\n  ufficiale_nota: ''\n};\n\nlet doc = null;\ntry {\n  if (riga.testo_bollettino) doc = JSON.parse(riga.testo_bollettino);\n} catch (e) {\n  esito.ufficiale_nota = 'Riga bollettino illeggibile: bollettino basato sui soli modelli numerici.';\n}\n\nif (!doc) {\n  if (!esito.ufficiale_nota) {\n    esito.ufficiale_nota = `Nessun bollettino ufficiale in tabella per \"${citta.regione}\": previsione basata sui soli modelli numerici.`;\n  }\n  return [{ json: esito }];\n}\n\nesito.ufficiale_ok = Boolean(doc.ok);\nesito.ufficiale_nome = doc.provider === 'arpal' ? 'ARPAL Liguria' : 'ARPA Piemonte';\nesito.ufficiale_numero = doc.bollettino || null;\nesito.ufficiale_emissione = doc.emissione || null;\nesito.ufficiale_by_date = doc.by_date || {};\nesito.ufficiale_tendenza = doc.tendenza || {};\n\n// --- freschezza -------------------------------------------------------------\n// updatedAt lo mantiene n8n sulla riga; se manca si usa il recuperato_il che\n// scrive il parser.\nconst quando = riga.updatedAt || riga.createdAt || doc.recuperato_il;\nif (quando) {\n  const ore = (Date.now() - new Date(quando).getTime()) / 3600000;\n  esito.ufficiale_ore = Math.round(ore);\n  if (ore > (cfg.ore_max_bollettino || 30)) {\n    esito.ufficiale_nota = `Bollettino ufficiale non aggiornato da ${Math.round(ore)} h (emissione ${doc.emissione || 'n/d'}).`;\n  }\n}\n\n// --- testo su misura per la città ------------------------------------------\n// Dei riferimenti ufficiali si tiene solo quello della località (più lo zero\n// termico, che vale per tutta la regione).\nfunction rifDellaCitta(rif) {\n  if (!rif) return '';\n  const pezzi = [];\n  const mio = rif[citta.rif];\n  if (mio && typeof mio === 'object' && 'min' in mio) {\n    pezzi.push(`${citta.rif}: ${mio.min}/${mio.max} °C${mio.prob_prec ? ` (prob. prec. ${mio.prob_prec})` : ''}`);\n  }\n  // Fasce di quota: utili solo dove la quota conta davvero.\n  if (citta.profilo === 'montagna' || citta.profilo === 'fondovalle') {\n    ['quota_700m', 'quota_1500m', 'quota_2000m'].forEach(k => {\n      const v = rif[k];\n      if (v && 'min' in v) pezzi.push(`${k.replace('quota_', '').replace('m', ' m')}: ${v.min}/${v.max} °C`);\n    });\n  }\n  if (rif.zero_termico_m) pezzi.push(`zero termico ${rif.zero_termico_m} m`);\n  return pezzi.join(' | ');\n}\n\nconst parti = [\n  `BOLLETTINO ${esito.ufficiale_nome} ${doc.bollettino || ''} — emissione ${doc.emissione || 'n/d'}`\n];\nif (doc.situazione) parti.push(`\\nSITUAZIONE ED EVOLUZIONE:\\n${doc.situazione}`);\n\nObject.entries(doc.by_date || {}).forEach(([iso, d]) => {\n  const rif = rifDellaCitta((doc.rif_localita || {})[iso]);\n  parti.push([\n    `\\n--- ${iso} (${d.etichetta}) — attendibilità dichiarata: ${d.affidabilita || 'n/d'} ---`,\n    d.cielo ? `CIELO E FENOMENI: ${d.cielo}` : null,\n    d.venti ? `VENTI: ${d.venti}` : null,\n    // Il mare interessa solo la costa; lo zero termico solo quota e fondovalle.\n    (d.mare && citta.profilo === 'costa') ? `MARE: ${d.mare}` : null,\n    (d.zero_termico && citta.profilo !== 'costa') ? `ZERO TERMICO: ${d.zero_termico}` : null,\n    d.temperature ? `TENDENZA TERMICA: ${d.temperature}` : null,\n    d.umidita ? `UMIDITÀ: ${d.umidita}` : null,\n    d.segnalazioni ? `SEGNALAZIONI PROT. CIVILE: ${d.segnalazioni}` : null,\n    rif ? `RIFERIMENTI UFFICIALI (${citta.nome}): ${rif}` : null\n  ].filter(Boolean).join('\\n'));\n});\n\nconst tend = Object.entries(doc.tendenza || {});\nif (tend.length) {\n  parti.push('\\n--- TENDENZA (giorni successivi, bassa risoluzione) ---');\n  tend.forEach(([iso, t]) => {\n    parti.push(`${iso}: ${t.previsioni} | temp: ${t.temperature} | venti: ${t.venti}${t.zero_termico ? ` | zero termico: ${t.zero_termico}` : ''} | attendibilità: ${t.affidabilita}`);\n  });\n}\n\nesito.ufficiale_clean = parti.join('\\n').trim();\n\nreturn [{ json: esito }];"
+      },
+      "id": "9539b0dc-d8b8-52a5-9753-767f3de30079",
+      "name": "Prepara Bollettino Ufficiale",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.open-meteo.com/v1/forecast",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "latitude",
+              "value": "={{ $json.citta.lat }}"
+            },
+            {
+              "name": "longitude",
+              "value": "={{ $json.citta.lon }}"
+            },
+            {
+              "name": "models",
+              "value": "icon_d2,meteofrance_arome_france_hd,italia_meteo_arpae_icon_2i,ecmwf_ifs025,gfs_seamless"
+            },
+            {
+              "name": "hourly",
+              "value": "={{ $json.hourly }}"
+            },
+            {
+              "name": "forecast_days",
+              "value": "={{ $('0. Config').first().json.forecast_days }}"
+            },
+            {
+              "name": "timezone",
+              "value": "auto"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "20aee57d-8d1e-5652-9476-1ff6de9206b7",
+      "name": "Dati Open-Meteo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        390,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// AGGREGATORE DETERMINISTICO (una sola località)\n// ============================================================================\n// Tutto ciò che è numerico nasce qui. L'LLM non produce mai numeri: li racconta.\n//\n// Cosa fa:\n//  - lavora su una città sola, quella scelta dal bot\n//  - calcola qui i fenomeni locali, secondo il profilo della località:\n//    nebbia, foehn, inversione termica, neve e zero termico\n//  - classifica la convezione con CAPE **e shear**, non col CAPE da solo:\n//    2330 J/kg con 0 mm di pioggia non sono un temporale, sono energia\n//    inespressa, e senza lo shear non c'è modo di distinguerlo\n// ============================================================================\n\nconst cfg = $('0. Config').first().json;\n// Il contesto arriva dal nodo precedente, che contiene GIÀ sia la richiesta\n// risolta sia il bollettino ufficiale letto dalla Data table: ripartire da\n// \"Risolvi Località\" perderebbe i campi ufficiale_*.\nconst contesto = $('Prepara Bollettino Ufficiale').first().json;\nconst citta = contesto.citta;\nconst fenomeni = contesto.fenomeni || [];\n\n// Con UNA coordinata Open-Meteo risponde con un oggetto, non con un array.\nconst primo = $input.first().json ?? {};\nconst loc = Array.isArray(primo) ? primo[0] : primo;\n\nif (!loc || !loc.hourly) {\n  throw new Error('Risposta Open-Meteo non valida o vuota: impossibile aggregare i dati.');\n}\n\n// --- catene di priorità modelli --------------------------------------------\n// AROME HD ha ~48 h di corsa: oltre quell'orizzonte i valori sono null e si\n// scala da sé sul modello successivo, ora per ora. AROME inoltre non fornisce\n// cloud_cover totale, probabilità, CIN e livelli isobarici: per quelle\n// grandezze la catena parte direttamente da ICON-D2 / ECMWF.\nconst M_SUOLO   = ['meteofrance_arome_france_hd', 'icon_d2', 'italia_meteo_arpae_icon_2i', 'ecmwf_ifs025', 'gfs_seamless'];\nconst M_NUBI    = ['icon_d2', 'italia_meteo_arpae_icon_2i', 'ecmwf_ifs025', 'gfs_seamless'];\nconst M_PROB    = ['ecmwf_ifs025', 'gfs_seamless'];\nconst M_CONV    = ['icon_d2', 'italia_meteo_arpae_icon_2i', 'gfs_seamless', 'ecmwf_ifs025'];\nconst M_QUOTA   = ['ecmwf_ifs025', 'gfs_seamless', 'icon_d2', 'italia_meteo_arpae_icon_2i'];\nconst M_PIOGGIA = ['meteofrance_arome_france_hd', 'icon_d2', 'italia_meteo_arpae_icon_2i'];\n// Neve, zero termico e visibilità: solo ICON-D2 e ICON-2I li danno su tutte le\n// località; GFS come rete di sicurezza.\nconst M_NEVE    = ['icon_d2', 'italia_meteo_arpae_icon_2i', 'gfs_seamless'];\n\nfunction val(h, base, models, i) {\n  for (const m of models) {\n    const arr = h[`${base}_${m}`];\n    if (Array.isArray(arr)) {\n      const v = arr[i];\n      if (v !== null && v !== undefined) return v;\n    }\n  }\n  const plain = h[base];\n  if (Array.isArray(plain) && plain[i] !== null && plain[i] !== undefined) return plain[i];\n  return null;\n}\n\n// Per la pioggia il \"primo non nullo\" sottostima: si prende lo scenario più\n// cautelativo tra i modelli ad alta risoluzione.\nfunction maxVal(h, base, models, i) {\n  let out = null;\n  for (const m of models) {\n    const arr = h[`${base}_${m}`];\n    const v = Array.isArray(arr) ? arr[i] : null;\n    if (v !== null && v !== undefined && (out === null || v > out)) out = v;\n  }\n  return out;\n}\n\nfunction normalizeWind(dir, speed) {\n  if (dir == null || speed == null || speed <= 5) return 'Variabile';\n  const d = ((Math.round(dir) % 360) + 360) % 360;\n  if (d >= 337 || d <= 22) return 'N';\n  if (d <= 67) return 'NE';\n  if (d <= 112) return 'E';\n  if (d <= 157) return 'SE';\n  if (d <= 202) return 'S';\n  if (d <= 247) return 'SO';\n  if (d <= 292) return 'O';\n  return 'NO';\n}\n\n// [9,10,11,15,16] -> \"09-11, 15-16\"\nfunction finestre(ore, maxBlocchi = 2) {\n  if (!ore.length) return null;\n  const s = [...new Set(ore)].sort((a, b) => a - b);\n  const blocchi = [];\n  let start = s[0], prev = s[0];\n  for (let i = 1; i < s.length; i++) {\n    if (s[i] === prev + 1) { prev = s[i]; continue; }\n    blocchi.push([start, prev]);\n    start = prev = s[i];\n  }\n  blocchi.push([start, prev]);\n  const p = n => String(n).padStart(2, '0');\n  return blocchi\n    .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))\n    .slice(0, maxBlocchi)\n    .sort((a, b) => a[0] - b[0])\n    .map(([a, b]) => (a === b ? `${p(a)}:00` : `${p(a)}-${p(b)}`))\n    .join(', ');\n}\n\nfunction cieloSintetico(pct) {\n  if (pct == null) return 'n/d';\n  if (pct < 20) return 'sereno';\n  if (pct < 40) return 'poco nuvoloso';\n  if (pct < 65) return 'parzialmente nuvoloso';\n  if (pct < 85) return 'molto nuvoloso';\n  return 'coperto';\n}\n\n// Direzione meteorologica (da dove viene) -> componenti u,v in m/s\nfunction componenti(spdKmh, dirDeg) {\n  const s = spdKmh / 3.6;\n  const r = (dirDeg * Math.PI) / 180;\n  return [-s * Math.sin(r), -s * Math.cos(r)];\n}\n\n// Deep-layer shear: differenza VETTORIALE fra vento a 500 hPa e vento a 10 m.\n// È ciò che distingue un rovescio isolato da una cella organizzata.\nfunction shearMs(spd500, dir500, spd10, dir10) {\n  if ([spd500, dir500, spd10, dir10].some(v => v === null || v === undefined)) return null;\n  const [u1, v1] = componenti(spd500, dir500);\n  const [u2, v2] = componenti(spd10, dir10);\n  return Math.hypot(u1 - u2, v1 - v2);\n}\n\n// La sola energia non basta a fare un temporale: se nessun modello ad alta\n// risoluzione bagna e la probabilità resta bassa, quel CAPE è energia\n// INESPRESSA (tappata dall'inibizione o priva di forzante), non un evento.\nfunction classificaConvezione(cape, shear, rainTot, prob, cin) {\n  if (cape == null || cape < 300) return 'assente';\n\n  const asciutto = rainTot < 0.2 && prob < 30;\n  const tappata = cin !== null && cin > 100 && rainTot < 1;\n  if (asciutto || tappata) return 'inespressa';\n\n  if (shear == null) return 'incerta';\n  if (cape >= 500 && shear > 20) return 'organizzata';\n  if (cape >= 500 && shear >= 10) return 'celle possibili';\n  return 'isolata';\n}\n\nconst media = a => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null);\nconst ORE_DETTAGLIO = [0, 3, 6, 9, 12, 15, 18, 21];\n\nconst vuoleNebbia     = fenomeni.includes('nebbia');\nconst vuoleFoehn      = fenomeni.includes('foehn');\nconst vuoleInversione = fenomeni.includes('inversione');\nconst vuoleNeve       = fenomeni.includes('neve');\n\nconst h = loc.hourly || {};\nconst times = h.time || [];\nconst daysMap = {};\n\nfor (let i = 0; i < times.length; i++) {\n  const dateStr = times[i].substring(0, 10);\n  const hour = Number(times[i].substring(11, 13));\n\n  if (!daysMap[dateStr]) {\n    daysMap[dateStr] = {\n      date: dateStr, orarie: [], dettaglio: [],\n      tmin: null, tmax: null, appMin: null, appMax: null,\n      windMax: 0, windDirNum: null, gustMax: 0, gustHour: null,\n      rainTot: 0, rainMaxH: 0, oreRain: [], probMax: 0,\n      capeMax: 0, cinMin: null, shearAlPicco: null, shearMax: 0,\n      nubi: [], nubiGiorno: [], nubiAlte: [], umid: [], oreValide: 0,\n      // fenomeni\n      oreNebbia: [], oreFoschia: [], visMin: null,\n      oreFoehn: [], oreInversione: [],\n      neveTot: 0, neveMaxDepth: 0, zeroMin: null, zeroMax: null\n    };\n  }\n  const day = daysMap[dateStr];\n\n  // ---- lettura oraria (tutte le 24 ore) ----------------------------------\n  const t     = val(h, 'temperature_2m', M_SUOLO, i);\n  const tApp  = val(h, 'apparent_temperature', M_SUOLO, i);\n  const wspd  = val(h, 'wind_speed_10m', M_SUOLO, i);\n  const gust  = val(h, 'wind_gusts_10m', M_SUOLO, i);\n  const wdir  = val(h, 'wind_direction_10m', M_SUOLO, i);\n  const rain  = maxVal(h, 'precipitation', M_PIOGGIA, i) ?? val(h, 'precipitation', M_SUOLO, i) ?? 0;\n  const prob  = val(h, 'precipitation_probability', M_PROB, i) ?? 0;\n  const nubi  = val(h, 'cloud_cover', M_NUBI, i);\n  const nAlte = val(h, 'cloud_cover_high', M_NUBI, i);\n  const rh    = val(h, 'relative_humidity_2m', M_SUOLO, i);\n  const cape  = val(h, 'cape', M_CONV, i);\n  const cin   = val(h, 'convective_inhibition', M_CONV, i);\n  const t850  = val(h, 'temperature_850hPa', M_QUOTA, i);\n  const s500  = val(h, 'wind_speed_500hPa', M_QUOTA, i);\n  const d500  = val(h, 'wind_direction_500hPa', M_QUOTA, i);\n\n  if (t !== null) {\n    day.oreValide++;\n    day.tmin = day.tmin === null ? t : Math.min(day.tmin, t);\n    day.tmax = day.tmax === null ? t : Math.max(day.tmax, t);\n  }\n  if (tApp !== null) {\n    day.appMin = day.appMin === null ? tApp : Math.min(day.appMin, tApp);\n    day.appMax = day.appMax === null ? tApp : Math.max(day.appMax, tApp);\n  }\n  if (wspd !== null && wspd > day.windMax) { day.windMax = wspd; day.windDirNum = wdir; }\n  if (gust !== null && gust > day.gustMax) { day.gustMax = gust; day.gustHour = hour; }\n  if (rain > 0) { day.rainTot += rain; day.oreRain.push(hour); }\n  if (rain > day.rainMaxH) day.rainMaxH = rain;\n  if (prob > day.probMax) day.probMax = prob;\n  if (cin !== null && (day.cinMin === null || cin < day.cinMin)) day.cinMin = cin;\n  if (nubi !== null) {\n    day.nubi.push(nubi);\n    if (hour >= 7 && hour <= 20) day.nubiGiorno.push(nubi);\n  }\n  if (nAlte !== null) day.nubiAlte.push(nAlte);\n  if (rh !== null) day.umid.push(rh);\n  day.orarie.push({ hour, gust: gust ?? 0 });\n\n  // ---- convezione: lo shear va letto NELL'ORA di massimo CAPE -------------\n  const sh = shearMs(s500, d500, wspd, wdir);\n  if (sh !== null && sh > day.shearMax) day.shearMax = sh;\n  if (cape !== null && cape > day.capeMax) {\n    day.capeMax = cape;\n    day.shearAlPicco = sh;\n  }\n\n  // ---- fenomeni locali ----------------------------------------------------\n  if (vuoleNebbia) {\n    const vis = val(h, 'visibility', M_NEVE, i);\n    const td  = val(h, 'dew_point_2m', M_SUOLO, i);\n    if (vis !== null) {\n      if (day.visMin === null || vis < day.visMin) day.visMin = vis;\n      if (vis < 1000) day.oreNebbia.push(hour);\n      else if (vis < 5000) day.oreFoschia.push(hour);\n    }\n    // Conferma indipendente da irraggiamento notturno: cielo sereno, aria\n    // ferma e rugiada vicina alla temperatura. Serve perché i modelli a scala\n    // regionale sottostimano regolarmente la nebbia di pianura.\n    const notte = hour >= 22 || hour <= 9;\n    if (notte && t !== null && td !== null && wspd !== null && nubi !== null &&\n        (t - td) < 2.5 && wspd < 6 && nubi < 40 && !day.oreNebbia.includes(hour)) {\n      day.oreFoschia.push(hour);\n    }\n  }\n\n  if (vuoleFoehn) {\n    const s850 = val(h, 'wind_speed_850hPa', M_QUOTA, i);\n    const d850 = val(h, 'wind_direction_850hPa', M_QUOTA, i);\n    if (s850 !== null && d850 !== null && rh !== null) {\n      const daNordOvest = d850 >= 270 && d850 <= 360;\n      if (daNordOvest && s850 > 25 && rh < 45) day.oreFoehn.push(hour);\n    }\n  }\n\n  // Proxy di inversione: T850 (~1500 m) più calda del suolo nelle ore notturne.\n  // Ha senso solo in pianura e nei fondovalle, dove l'aria fredda ristagna.\n  if (vuoleInversione && citta.quota < 800 && hour <= 7) {\n    if (t !== null && t850 !== null && t850 > t + 2) day.oreInversione.push(hour);\n  }\n\n  if (vuoleNeve) {\n    const neve = val(h, 'snowfall', M_NEVE, i);\n    const spess = val(h, 'snow_depth', M_NEVE, i);\n    const zero = val(h, 'freezing_level_height', M_NEVE, i);\n    if (neve !== null && neve > 0) day.neveTot += neve;\n    if (spess !== null && spess > day.neveMaxDepth) day.neveMaxDepth = spess;\n    if (zero !== null) {\n      day.zeroMin = day.zeroMin === null ? zero : Math.min(day.zeroMin, zero);\n      day.zeroMax = day.zeroMax === null ? zero : Math.max(day.zeroMax, zero);\n    }\n  }\n\n  // ---- riga di dettaglio ogni 3 h -----------------------------------------\n  if (!ORE_DETTAGLIO.includes(hour)) continue;\n\n  const zRaw = val(h, 'geopotential_height_500hPa', M_QUOTA, i);\n  const z500 = zRaw == null ? '-' : Math.round(zRaw / 10);\n  const t500 = val(h, 'temperature_500hPa', M_QUOTA, i);\n\n  let riga = ` ${String(hour).padStart(2, '0')}h | Z500:${z500} T500:${t500 != null ? t500.toFixed(1) : '-'} T850:${t850 != null ? t850.toFixed(1) : '-'}` +\n    ` | T:${t != null ? t.toFixed(1) : '-'}°C (perc.${tApp != null ? tApp.toFixed(1) : '-'}°C) UR:${rh != null ? Math.round(rh) : '-'}%` +\n    ` | Nubi:${nubi != null ? Math.round(nubi) : '-'}% (alte ${nAlte != null ? Math.round(nAlte) : '-'}%)` +\n    ` | Pioggia:${rain.toFixed(1)}mm/h Prob:${Math.round(prob)}%` +\n    ` | CAPE:${cape != null ? Math.round(cape) : '-'} CIN:${cin != null ? Math.round(cin) : '-'} Shear:${sh != null ? sh.toFixed(0) : '-'}m/s` +\n    ` | Vento:${wspd != null ? Math.round(wspd) : '-'}km/h Raff:${gust != null ? Math.round(gust) : '-'}km/h Dir:${wdir != null ? Math.round(wdir) : '-'}°`;\n\n  if (vuoleNeve) {\n    const zero = val(h, 'freezing_level_height', M_NEVE, i);\n    const neve = val(h, 'snowfall', M_NEVE, i);\n    riga += ` | Zero:${zero != null ? Math.round(zero) : '-'}m Neve:${neve != null ? neve.toFixed(1) : '-'}cm`;\n  }\n  if (vuoleNebbia) {\n    const vis = val(h, 'visibility', M_NEVE, i);\n    riga += ` | Vis:${vis != null ? Math.round(vis) : '-'}m`;\n  }\n\n  day.dettaglio.push(riga);\n}\n\n// Scarta le giornate incomplete in coda.\nconst giorniOrdinati = Object.keys(daysMap).sort()\n  .filter(d => daysMap[d].oreValide >= 12)\n  .slice(0, cfg.forecast_days || 4);\n\nlet testo = '';\nconst stats = {};\n\nfor (const d of giorniOrdinati) {\n  const day = daysMap[d];\n  const dirStr = normalizeWind(day.windDirNum, day.windMax);\n  const nubiMedia = media(day.nubi);\n  const nubiDiurne = media(day.nubiGiorno);\n  const umidMedia = media(day.umid);\n\n  const sogliaG = day.gustMax * 0.85;\n  const oreVento = day.gustMax >= 20 ? day.orarie.filter(r => r.gust >= sogliaG).map(r => r.hour) : [];\n\n  const classe = classificaConvezione(\n    day.capeMax, day.shearAlPicco,\n    day.rainTot, day.probMax,\n    day.cinMin === null ? null : day.cinMin\n  );\n\n  const s = {\n    tmin: day.tmin !== null ? Number(day.tmin.toFixed(1)) : null,\n    tmax: day.tmax !== null ? Number(day.tmax.toFixed(1)) : null,\n    perc_min: day.appMin !== null ? Number(day.appMin.toFixed(1)) : null,\n    perc_max: day.appMax !== null ? Number(day.appMax.toFixed(1)) : null,\n    wind: Math.round(day.windMax),\n    gust: Math.round(day.gustMax),\n    dir: dirStr,\n    rain_tot: Number(day.rainTot.toFixed(1)),\n    rain_max_h: Number(day.rainMaxH.toFixed(1)),\n    prob: Math.round(day.probMax),\n    nuvolosita: nubiMedia,\n    nuvolosita_diurna: nubiDiurne,\n    nuvolosita_alta: media(day.nubiAlte),\n    cielo: cieloSintetico(nubiDiurne ?? nubiMedia),\n    umidita: umidMedia,\n    cape_max: Math.round(day.capeMax),\n    cin_min: day.cinMin !== null ? Math.round(day.cinMin) : null,\n    shear_ms: day.shearAlPicco !== null ? Number(day.shearAlPicco.toFixed(1)) : null,\n    convezione: classe,\n    finestra_pioggia: finestre(day.oreRain),\n    finestra_vento: finestre(oreVento)\n  };\n\n  // --- fenomeni locali nel riepilogo giornaliero ---------------------------\n  if (vuoleNebbia) {\n    s.nebbia = day.oreNebbia.length ? finestre(day.oreNebbia) : null;\n    s.foschia = day.oreFoschia.length ? finestre(day.oreFoschia) : null;\n    s.vis_min = day.visMin !== null ? Math.round(day.visMin) : null;\n  }\n  if (vuoleFoehn) s.foehn = day.oreFoehn.length ? finestre(day.oreFoehn) : null;\n  if (vuoleInversione) s.inversione = day.oreInversione.length ? finestre(day.oreInversione) : null;\n  if (vuoleNeve) {\n    s.neve_cm = Number(day.neveTot.toFixed(1));\n    s.neve_al_suolo_cm = Number((day.neveMaxDepth * 100).toFixed(0)); // snow_depth è in m\n    s.zero_termico_min = day.zeroMin !== null ? Math.round(day.zeroMin) : null;\n    s.zero_termico_max = day.zeroMax !== null ? Math.round(day.zeroMax) : null;\n  }\n\n  stats[d] = s;\n\n  testo += `\\n=== GIORNO: ${d} ===\\n`;\n  testo += `[VALORI AGGREGATI DETERMINISTICI — calcolati su tutte le 24 h]\\n`;\n  testo += `- Tmin/Tmax: ${s.tmin ?? '-'} / ${s.tmax ?? '-'} °C (percepita ${s.perc_min ?? '-'} / ${s.perc_max ?? '-'} °C)\\n`;\n  testo += `- Cielo: ${s.cielo} (copertura media diurna ${nubiDiurne ?? '-'} %, nubi alte ${s.nuvolosita_alta ?? '-'} %) | Umidità relativa media: ${umidMedia ?? '-'} %\\n`;\n  testo += `- Vento max: ${s.wind} km/h da ${dirStr} | raffica max: ${s.gust} km/h${s.finestra_vento ? ` | rinforzi ore ${s.finestra_vento}` : ''}\\n`;\n  testo += `- Pioggia TOTALE giornaliera: ${s.rain_tot} mm | intensità oraria max: ${s.rain_max_h} mm/h | probabilità max: ${s.prob} %`;\n  testo += s.finestra_pioggia ? ` | fenomeni ore ${s.finestra_pioggia}\\n` : ` | nessuna ora con precipitazione prevista\\n`;\n  testo += `- Convezione: ${classe.toUpperCase()} (CAPE max ${s.cape_max} J/kg, CIN min ${s.cin_min ?? '-'} J/kg, shear al picco ${s.shear_ms ?? '-'} m/s)\\n`;\n\n  if (vuoleNeve) {\n    testo += `- Zero termico: ${s.zero_termico_min ?? '-'}–${s.zero_termico_max ?? '-'} m | Neve prevista: ${s.neve_cm} cm | Manto al suolo: ${s.neve_al_suolo_cm} cm\\n`;\n  }\n  if (vuoleNebbia) {\n    testo += `- Visibilità minima: ${s.vis_min ?? '-'} m`;\n    testo += s.nebbia ? ` | NEBBIA ore ${s.nebbia}` : '';\n    testo += s.foschia ? ` | foschia ore ${s.foschia}` : '';\n    testo += (!s.nebbia && !s.foschia) ? ' | nessuna riduzione di visibilità' : '';\n    testo += '\\n';\n  }\n  if (vuoleFoehn) {\n    testo += `- Foehn: ${s.foehn ? `condizioni favorevoli ore ${s.foehn}` : 'nessun segnale'}\\n`;\n  }\n  if (vuoleInversione) {\n    testo += `- Inversione termica notturna (proxy T850 vs suolo): ${s.inversione ? `probabile ore ${s.inversione}` : 'non indicata'}\\n`;\n  }\n\n  testo += `\\n[DETTAGLIO ORARIO OGNI 3 H]\\n`;\n  testo += day.dettaglio.join('\\n') + '\\n';\n}\n\nreturn [{\n  json: {\n    ...contesto,\n    dati_modelli: testo,\n    raw_stats: stats,\n    giorni_previsti: giorniOrdinati,\n    quota_modello: loc.elevation ?? null\n  }\n}];"
+      },
+      "id": "d55abcc2-d032-5747-8d14-53f66c9e403c",
+      "name": "Aggregatore",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "notes": "Qui nasce ogni numero del bollettino."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// MICRO-AGENTI (2 chiamate: quota + suolo della località richiesta)\n// ============================================================================\n// Girano a ogni richiesta perché i dati numerici cambiano nell'arco della\n// giornata, mentre il bollettino ufficiale no (quello sta in cache).\n//\n// Quota: 2 chiamate qui + 1 dell'Agente Capo = 3 per bollettino, tutte su\n// Flash Lite (500 richieste/giorno) -> ~166 bollettini. 3.7 Flash, che si\n// ferma a 20 al giorno, resta solo come fallback dell'Agente Capo.\n// ============================================================================\n\nconst cfg = $('0. Config').first().json;\nconst contesto = $input.first().json;\nconst citta = contesto.citta;\n\nconst apiKey = cfg.gemini_api_key;\nconst model = cfg.gemini_model_micro || 'gemini-3.5-flash-lite';\nconst url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;\n\nif (!apiKey || apiKey.startsWith('INCOLLA_QUI')) {\n  throw new Error('API key Gemini non configurata nel nodo \"0. Config\".');\n}\n\nconst ctx = this; // serve per this.helpers.httpRequest\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nconst dati = contesto.dati_modelli || '';\nconst fenomeni = contesto.fenomeni || [];\n\n// Righe extra chieste al micro-agente SUOLO solo dove il profilo le prevede.\nconst righeFenomeni = [\n  fenomeni.includes('nebbia')\n    ? '  * Visibilità: [Nebbia o foschia con le ore già calcolate, oppure \"visibilità buona\"]' : null,\n  fenomeni.includes('foehn')\n    ? '  * Foehn: [Riporta la finestra oraria se indicata, altrimenti \"nessun segnale\"]' : null,\n  fenomeni.includes('inversione')\n    ? '  * Inversione notturna: [Solo se indicata nei dati; è un proxy, non una misura]' : null,\n  fenomeni.includes('neve')\n    ? '  * Zero termico e neve: [Quota dello zero termico e neve prevista, valori pre-calcolati]' : null\n].filter(Boolean).join('\\n');\n\nconst promptQuota = `Sei l'Agente Specialista QUOTA per ${citta.nome} (${citta.quota} m s.l.m.).\nAnalizza i dati pre-calcolati:\n${dati}\n\nREGOLE TASSATIVE:\nLavora esclusivamente giorno per giorno. Non ricalcolare nulla: i valori sono già definitivi.\n\nSulla convezione usa la classificazione già presente nei dati, che combina\nenergia (CAPE), inibizione (CIN), shear e pioggia effettiva:\n- ASSENTE: niente da segnalare.\n- INESPRESSA: c'è energia ma nessun modello bagna. NON è un temporale: è\n  energia bloccata o priva di forzante. Vietato trasformarla in allarme.\n- ISOLATA: rovesci brevi e localizzati, poco organizzati.\n- CELLE POSSIBILI / ORGANIZZATA: lo shear regge le celle, possibili colpi\n  di vento associati.\n\nTEMPLATE PER OGNI GIORNO:\n* **[Data MM-GG]:**\n  * Sinottica & 850hPa: [Stato di T850, Z500 e vento in quota, max 20 parole]\n  * Giudizio Termodinamico: [Classe di convezione e cosa comporta davvero. Max 15 parole.]`;\n\nconst promptSuolo = `Sei l'Agente Specialista SUOLO per ${citta.nome} (${citta.quota} m s.l.m.).\nAnalizza i dati pre-calcolati:\n${dati}\n\nREGOLE TASSATIVE:\nLavora esclusivamente giorno per giorno. Usa i valori pre-calcolati così come\nsono, non ricalcolarli e non arrotondarli.\n\nTEMPLATE PER OGNI GIORNO:\n* **[Data MM-GG]:**\n  * Tmin_Tmax: [Valori pre-calcolati, inclusa la percepita]\n  * Cielo: [Copertura media e come evolve nella giornata]\n  * Vento_Previsto: [Valori pre-calcolati con direzione]\n  * Pioggia_Prevista: [Totale giornaliero e intensità oraria max]\n${righeFenomeni}\n  * Finestra Fenomeni: [Riporta le finestre orarie già calcolate. Se non ci\n    sono fenomeni scrivi \"Fenomeni assenti\". Max 12 parole.]`;\n\nasync function callLlm(key, promptText) {\n  const tentativi = 1 + (cfg.gemini_retry ?? 2);\n  let ultimoErrore;\n\n  for (let n = 0; n < tentativi; n++) {\n    try {\n      const res = await ctx.helpers.httpRequest({\n        url,\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },\n        body: {\n          contents: [{ parts: [{ text: promptText }] }],\n          generationConfig: {\n            temperature: 0,\n            maxOutputTokens: cfg.gemini_max_output_tokens || 4096,\n            thinkingConfig: { thinkingBudget: -1 }\n          }\n        },\n        json: true,\n        timeout: cfg.gemini_timeout_ms || 120000\n      });\n\n      const blocco = res.promptFeedback?.blockReason;\n      if (blocco) throw new Error(`prompt bloccato dai filtri (${blocco})`);\n\n      const cand = res.candidates?.[0];\n      const parts = cand?.content?.parts || [];\n      const testo = parts.filter(p => !p.thought).map(p => p.text || '').join('').trim();\n\n      if (!testo) {\n        // MAX_TOKENS = budget consumato tutto dal reasoning: alzare\n        // gemini_max_output_tokens in \"0. Config\".\n        throw new Error(`nessun testo utile (finishReason: ${cand?.finishReason || 'risposta vuota'})`);\n      }\n      return { key, text: testo };\n    } catch (error) {\n      ultimoErrore = error;\n      const codice = error.statusCode || error.httpCode || error.response?.status || 0;\n      const ritentabile = [408, 409, 425, 429, 500, 502, 503, 504].includes(Number(codice))\n        || /timeout|ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message || '');\n      if (n === tentativi - 1 || !ritentabile) break;\n      await sleep(1500 * Math.pow(2, n)); // 1.5s, 3s, 6s\n    }\n  }\n  throw new Error(`[${key}] ${ultimoErrore?.message || 'errore sconosciuto'}`);\n}\n\nconst job = [\n  { key: 'rep_quota', prompt: promptQuota },\n  { key: 'rep_suolo', prompt: promptSuolo }\n];\n\nconst esiti = await Promise.allSettled(job.map(j => callLlm(j.key, j.prompt)));\n\nconst falliti = [];\nconst reports = {};\nesiti.forEach((e, i) => {\n  const key = job[i].key;\n  if (e.status === 'fulfilled') {\n    reports[key] = e.value.text;\n  } else {\n    // Degrado morbido: l'Agente Capo riceve una nota esplicita invece di un\n    // buco silenzioso, che riempirebbe di invenzioni.\n    reports[key] = '(report non disponibile: micro-agente in errore)';\n    falliti.push(`${key}: ${e.reason?.message || e.reason}`);\n  }\n});\n\nif (falliti.length === job.length) {\n  throw new Error('Entrambi i micro-agenti hanno fallito:\\n' + falliti.join('\\n'));\n}\n\nreturn [{ json: { ...contesto, ...reports, micro_agenti_falliti: falliti } }];"
+      },
+      "id": "29506123-c682-55d5-a25b-7c42b1948df4",
+      "name": "Micro-Agenti",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        810,
+        300
+      ],
+      "notes": "2 chiamate in parallelo, con retry e degrado morbido."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "===== BOLLETTINO PER {{ $json.citta.nome }} ====\nQuota della località: {{ $json.citta.quota }} m s.l.m. — profilo: {{ $json.citta.profilo }}\nData di emissione: {{ $now.setZone('Europe/Rome').setLocale('it').toFormat('cccc d MMMM yyyy') }}\n\nRUOLO\nSei il METEOROLOGO CAPO PREVISORE. Redigi il bollettino per UNA sola località:\n{{ $json.citta.nome }}.\n\nIl tuo compito è interpretare la dinamica atmosferica e scrivere il testo\ndescrittivo. Tutti i valori numerici (temperature, vento, pioggia, zero termico,\nmare) li inserisce dopo di te uno script deterministico: NON devi produrli.\n\n==================================================\nFONTI\n==================================================\n\nFONTE UFFICIALE ({{ $json.ufficiale_nome }}): scala regionale, evoluzione\nsinottica, attendibilità dichiarata.\n\nMICRO-AGENTI: diagnosi locale giorno per giorno sui modelli ad alta risoluzione.\nSe un report riporta \"(report non disponibile...)\", NON inventare: lavora con le\nfonti rimaste e abbassa la confidenza.\n\nQuando fonte ufficiale e modelli concordano, dillo in una riga. Quando divergono,\ndescrivi l'incertezza senza costruire scenari che nessuna delle due sostiene.\n\n==================================================\nCONVEZIONE — LEGGERE CON ATTENZIONE\n==================================================\n\nI dati contengono una classe già calcolata. Rispettala alla lettera:\n\n- ASSENTE → non nominare instabilità.\n- INESPRESSA → c'è energia in quota ma NESSUN modello prevede pioggia.\n  NON è un temporale. Non scrivere \"possibili rovesci\", non scrivere\n  \"instabilità pomeridiana\". Descrivi cielo, ventilazione e caldo.\n- ISOLATA → \"possibili rovesci isolati, di breve durata\".\n- CELLE POSSIBILI / ORGANIZZATA → \"possibili rovesci o temporali\", ed è\n  ammesso citare colpi di vento associati ai fenomeni.\n\nVIETATO scrivere nel testo le parole \"CAPE\", \"CIN\", \"shear\", \"J/kg\".\n\n==================================================\nREGOLE NUMERICHE\n==================================================\n\nNON scrivere numeri di grandezze fisiche: niente °C, km/h, mm, percentuali,\nniente quote in metri. Traduci in linguaggio: \"massime in lieve aumento\",\n\"ventilazione moderata\", \"piogge deboli\", \"zero termico molto alto\".\n\nECCEZIONE — GLI ORARI SONO OBBLIGATORI: usa le finestre orarie già calcolate,\nsenza modificarle. Esempi: \"rinforzi tra le 12 e le 15\", \"nebbia fino alle 8\",\n\"fenomeni assenti per l'intera giornata\".\n\nNon usare mai \"registrato/registrata/registrati\": usa \"previsto\", \"atteso\",\n\"modellato\". Il tempo verbale è sempre al futuro.\n\n==================================================\nLUNGHEZZA — REQUISITO VINCOLANTE\n==================================================\n\nOgni \"descrizione\" giornaliera deve essere di 4-5 frasi complete e contenere\nALMENO 60 PAROLE. Una descrizione di una o due righe è considerata SBAGLIATA e\nva riscritta più distesa prima di rispondere.\n\nOgni giornata deve contenere, in quest'ordine:\n1. copertura nuvolosa e come evolve nella giornata;\n2. finestra oraria dei fenomeni o del vento (o l'esplicita assenza);\n3. eventuale nota di stabilità, solo se la classe di convezione la giustifica;\n4. i fenomeni locali del profilo, se presenti (nebbia, foehn, inversione, neve);\n5. percezione termica, ricavata dallo scarto fra temperatura reale e percepita\n   e dall'umidità, senza citarne i valori.\n\nESEMPIO DI DESCRIZIONE BEN SCRITTA (imita questo respiro, non il contenuto):\n\"Giornata di cielo poco nuvoloso, con qualche velatura in transito nelle ore\ncentrali e schiarite ampie verso sera. Non sono attesi fenomeni: la ventilazione\nresta debole, con un rinforzo di brezza tra le 12 e le 15 lungo la costa.\nL'energia presente in quota resta inespressa e non porta a rovesci. Le\ntemperature si mantengono su valori superiori alla media, e l'umidità elevata\nrende la percezione più pesante di quanto indichi il termometro, specie nelle\nore pomeridiane.\"\n\n==================================================\nOUTPUT — SOLO JSON VALIDO, NIENTE MARKDOWN, NIENTE ```\n==================================================\n\nRispetta esattamente questo schema, con queste date e in quest'ordine.\nIl campo \"data_iso\" va ricopiato identico.\n\n{\n  \"quadro_generale\": \"\",\n  \"confronto_ufficiale\": \"\",\n  \"confidenza\": \"Media\",\n  \"giorni\": [\n    { \"data_iso\": \"{{ $json.giorni_previsti[0] || '' }}\", \"descrizione\": \"\" },\n    { \"data_iso\": \"{{ $json.giorni_previsti[1] || '' }}\", \"descrizione\": \"\" },\n    { \"data_iso\": \"{{ $json.giorni_previsti[2] || '' }}\", \"descrizione\": \"\" },\n    { \"data_iso\": \"{{ $json.giorni_previsti[3] || '' }}\", \"descrizione\": \"\" }\n  ]\n}\n\n\"quadro_generale\": massimo 5 frasi sull'evoluzione della massa d'aria nei 4 giorni.\n\"confronto_ufficiale\": massimo 2 frasi su concordanza o divergenza con la fonte ufficiale.\n\"confidenza\": esattamente una tra \"Alta\", \"Media\", \"Bassa\".\n\n==================================================\nDATI DA ANALIZZARE\n==================================================\n\n=== FONTE UFFICIALE ===\n{{ $json.ufficiale_clean }}\n\n=== {{ $json.citta.nome }} — QUOTA ===\n{{ $json.rep_quota }}\n\n=== {{ $json.citta.nome }} — SUOLO ===\n{{ $json.rep_suolo }}\n\nFINE ISTRUZIONI.",
+        "needsFallback": true,
+        "messages": {
+          "messageValues": []
+        },
+        "batching": {}
+      },
+      "id": "798f6dc6-186b-5d99-a2d1-b821be3fe0db",
+      "name": "Agente Capo",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.5-flash-lite",
+        "options": {
+          "temperature": 0.3,
+          "maxOutputTokens": 8192
+        }
+      },
+      "id": "a3600bc9-8c5e-57e4-b270-357fada70fa9",
+      "name": "Gemini Flash Lite (primario)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.7-flash",
+        "options": {
+          "temperature": 0.3,
+          "maxOutputTokens": 8192
+        }
+      },
+      "id": "39ae84ab-a7f6-5951-8d7c-10307f40450d",
+      "name": "Gemini 3.7 Flash (fallback)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1140,
+        540
+      ],
+      "notes": "Subentra se Flash Lite dà errore o 429."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// VALIDATORE E SOVRASCRITTURA NUMERICA\n// ============================================================================\n// La lista dei giorni la decide lo SCRIPT, non l'LLM: se il modello salta una\n// giornata o sbaglia una data, la mail resta corretta. I numeri vengono tutti\n// riscritti da qui, l'LLM contribuisce solo il testo.\n// ============================================================================\n\nconst cfg = $('0. Config').first().json;\nconst rawText = String($input.first().json.text || '');\n\n// L'Agente Capo (chainLlm) restituisce SOLO { text }: il contesto va ripreso\n// dal nodo che l'ha prodotto.\nconst contesto = $('Micro-Agenti').first().json;\nconst citta = contesto.citta;\nconst riquadro = contesto.riquadro;\n\n// --- 1. estrazione del JSON -------------------------------------------------\nfunction estraiJson(testo) {\n  let t = testo.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();\n  const primo = t.indexOf('{');\n  const ultimo = t.lastIndexOf('}');\n  if (primo === -1 || ultimo === -1 || ultimo <= primo) return null;\n  t = t.substring(primo, ultimo + 1);\n  try { return JSON.parse(t); } catch (e) { /* si tenta la ripulitura */ }\n  try { return JSON.parse(t.replace(/,\\s*([}\\]])/g, '$1')); } catch (e) { return null; }\n}\n\nconst data = estraiJson(rawText);\nif (!data) {\n  throw new Error(\n    'JSON non valido dall\\'Agente Capo. Primi 400 caratteri della risposta:\\n' + rawText.slice(0, 400)\n  );\n}\n\n// --- 2. utilità -------------------------------------------------------------\nconst GIORNI_IT = ['Domenica', 'Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato'];\n\nfunction titoloIta(iso) {\n  const d = new Date(`${iso}T12:00:00Z`);\n  if (isNaN(d)) return iso;\n  return `${GIORNI_IT[d.getUTCDay()]} (${iso.slice(8, 10)}-${iso.slice(5, 7)})`;\n}\n\n// Tiene solo le parti della riga MARE pertinenti alla zona della località.\n// \"Mosso a Levante, poco mosso ovunque la sera\" + ponente -> \"Poco mosso ovunque la sera\"\nfunction mareZona(testo, zona) {\n  if (!testo) return '';\n  const zone = ['ponente', 'centro', 'levante'];\n  const altre = zone.filter(z => z !== zona);\n  const proprie = [], generiche = [];\n\n  for (const c of testo.split(',').map(s => s.trim()).filter(Boolean)) {\n    const low = c.toLowerCase();\n    if (altre.some(z => low.includes(z))) continue;\n    if (low.includes(zona)) proprie.push(c); else generiche.push(c);\n  }\n  const scelte = proprie.length ? proprie.concat(generiche) : generiche;\n  if (!scelte.length) return '';\n  const s = scelte.join(', ').replace(/\\s+/g, ' ').trim();\n  return s.charAt(0).toUpperCase() + s.slice(1);\n}\n\nfunction ripulisciTesto(s) {\n  return String(s || '')\n    .replace(/si registrer[àa]/gi, 'si prevede')\n    .replace(/registrat([oaie])/gi, (_, v) => ({ o: 'previsto', a: 'prevista', i: 'previsti', e: 'previste' }[v.toLowerCase()]))\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\n// --- 3. dati deterministici -------------------------------------------------\nconst raw_stats = contesto.raw_stats || {};\nconst dateKeys = (contesto.giorni_previsti || []).length\n  ? contesto.giorni_previsti\n  : Object.keys(raw_stats).sort();\n\nconst byDate = contesto.ufficiale_by_date || {};\nconst tendenza = contesto.ufficiale_tendenza || {};\nconst giorniLlm = Array.isArray(data.giorni) ? data.giorni : [];\n\nconst giorni = dateKeys.map((iso, index) => {\n  // abbinamento: data_iso -> posizione\n  let g = giorniLlm.find(x => String(x.data_iso || '').trim() === iso) || giorniLlm[index] || {};\n\n  const s = raw_stats[iso] || {};\n  const uff = byDate[iso] || {};\n  const tend = tendenza[iso] || {};\n\n  // --- la quarta metrica dipende dal profilo della località ----------------\n  const extra = {};\n  if (riquadro === 'mare') {\n    let mare = mareZona(uff.mare, citta.zona_mare);\n    if (!mare) mare = 'Non disponibile';\n    extra.mare = mare;\n  } else if (riquadro === 'neve') {\n    extra.zero_termico_min = s.zero_termico_min ?? null;\n    extra.zero_termico_max = s.zero_termico_max ?? null;\n    extra.neve_cm = s.neve_cm ?? 0;\n    extra.neve_al_suolo_cm = s.neve_al_suolo_cm ?? 0;\n  } else if (riquadro === 'visibilita') {\n    extra.vis_min = s.vis_min ?? null;\n    extra.nebbia = s.nebbia || null;\n    extra.foschia = s.foschia || null;\n  }\n\n  return {\n    data_iso: iso,\n    titolo: titoloIta(iso),\n    descrizione: ripulisciTesto(g.descrizione) || '(descrizione non disponibile per questa giornata)',\n\n    // --- numeri: sempre e solo dallo script -------------------------------\n    tmin: s.tmin ?? null,\n    tmax: s.tmax ?? null,\n    perc_min: s.perc_min ?? null,\n    perc_max: s.perc_max ?? null,\n    vento_dir: s.dir || 'Variabile',\n    vento_kmh: s.wind ?? null,\n    raffiche_kmh: s.gust ?? null,\n    pioggia_mm: s.rain_tot ?? 0,\n    pioggia_max_h: s.rain_max_h ?? 0,\n    prob_pioggia: s.prob ?? 0,\n    nuvolosita: s.nuvolosita_diurna ?? s.nuvolosita ?? null,\n    cielo: s.cielo || 'n/d',\n    umidita: s.umidita ?? null,\n    convezione: s.convezione || 'assente',\n    finestra_pioggia: s.finestra_pioggia || null,\n    finestra_vento: s.finestra_vento || null,\n    foehn: s.foehn || null,\n    inversione: s.inversione || null,\n    ...extra,\n\n    uff_cielo: uff.cielo || tend.previsioni || '',\n    uff_affidabilita: uff.affidabilita || tend.affidabilita || ''\n  };\n});\n\n// --- 4. avvisi diagnostici (finiscono nel piè di pagina della mail) ---------\nconst avvisi = [];\nif (contesto.ufficiale_nota) avvisi.push(contesto.ufficiale_nota);\nconst falliti = contesto.micro_agenti_falliti || [];\nif (falliti.length) avvisi.push(`Micro-agenti non disponibili: ${falliti.length} su 2.`);\n\nconst troppoCorte = giorni.filter(g => g.descrizione.split(/\\s+/).length < 35).length;\nif (troppoCorte) avvisi.push(`${troppoCorte} descrizioni più brevi del previsto.`);\n\nreturn [{\n  json: {\n    forecast: {\n      citta: citta.nome,\n      profilo: citta.profilo,\n      riquadro,\n      quadro_generale: ripulisciTesto(data.quadro_generale),\n      confronto_ufficiale: ripulisciTesto(data.confronto_ufficiale || data.confronto_arpal),\n      confidenza: ['Alta', 'Media', 'Bassa'].includes(data.confidenza) ? data.confidenza : 'Media',\n      giorni\n    },\n    meta: {\n      fonte: contesto.ufficiale_nome || null,\n      bollettino: contesto.ufficiale_numero || null,\n      emissione: contesto.ufficiale_emissione || null,\n      quota: citta.quota,\n      quota_modello: contesto.quota_modello ?? null,\n      giorni: dateKeys,\n      avvisi\n    },\n    emails: contesto.emails,\n    chat_id: contesto.chat_id\n  }\n}];"
+      },
+      "id": "659e4854-6fc9-5e78-b356-a95204483ebb",
+      "name": "Validatore",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1230,
+        300
+      ],
+      "notes": "Le date le decide lo script, non il modello."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FORMATTA HTML (+ versione testuale)\n// ============================================================================\n// La quarta casella cambia secondo il profilo della località:\n//   costa      -> 🌊 Mare\n//   pianura    -> 🌫️ Visibilità\n//   montagna   -> 🏔️ Zero termico e neve\n//   fondovalle -> 🏔️ Zero termico e neve\n// ============================================================================\n\nconst src = $input.first().json;\nconst f = src.forecast || {};\nconst meta = src.meta || {};\n\nconst esc = s => String(s ?? '')\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\n\nconst num = (v, unita = '', dec = 0) =>\n  (v === null || v === undefined || v === '' || Number.isNaN(Number(v)))\n    ? 'n/d' : `${Number(v).toFixed(dec)}${unita}`;\n\nconst piccolo = t => `<br><span style=\"font-size:9.5px;font-weight:500;color:#64748b;\">${t}</span>`;\n\n// --- quarta casella, dipendente dal profilo --------------------------------\nfunction quartaCasella(g) {\n  if (f.riquadro === 'neve') {\n    const zt = (g.zero_termico_min != null && g.zero_termico_max != null)\n      ? `${Math.round(g.zero_termico_min / 10) * 10}–${Math.round(g.zero_termico_max / 10) * 10} m`\n      : 'n/d';\n    const neve = g.neve_cm > 0\n      ? `neve ${num(g.neve_cm, ' cm', 1)}`\n      : (g.neve_al_suolo_cm > 0 ? `manto ${num(g.neve_al_suolo_cm, ' cm')}` : 'niente neve');\n    return { bg: '#eef2ff', bd: '#c7d2fe', fg: '#4338ca', tit: '🏔️ Zero term.', val: `${zt}${piccolo(neve)}` };\n  }\n  if (f.riquadro === 'visibilita') {\n    const vis = g.vis_min != null\n      ? (g.vis_min >= 1000 ? `${(g.vis_min / 1000).toFixed(1)} km` : `${Math.round(g.vis_min)} m`)\n      : 'n/d';\n    const nota = g.nebbia ? `nebbia ${esc(g.nebbia)}` : (g.foschia ? `foschia ${esc(g.foschia)}` : 'buona');\n    return { bg: '#f5f3ff', bd: '#ddd6fe', fg: '#6d28d9', tit: '🌫️ Visibilità', val: `${vis}${piccolo(nota)}` };\n  }\n  return { bg: '#f0fdf4', bd: '#bbf7d0', fg: '#15803d', tit: '🌊 Mare', val: esc(g.mare || 'Non disponibile') };\n}\n\nfunction boxPioggia(g) {\n  const tot = num(g.pioggia_mm, ' mm', 1);\n  if (!g.pioggia_mm) return `${tot}${piccolo(`prob. ${num(g.prob_pioggia, '%')}`)}`;\n  return `${tot}${piccolo(`max ${num(g.pioggia_max_h, ' mm/h', 1)} · prob. ${num(g.prob_pioggia, '%')}`)}`;\n}\n\nfunction statsTableHtml(g) {\n  const celle = [\n    { bg: '#f0f9ff', bd: '#bae6fd', fg: '#0369a1', tit: '🌡️ Temp',\n      val: `${num(g.tmin, '°', 1)} / ${num(g.tmax, '°C', 1)}${piccolo(`perc. ${num(g.perc_min, '°', 1)} / ${num(g.perc_max, '°C', 1)}`)}` },\n    { bg: '#f0fdfa', bd: '#99f6e4', fg: '#0f766e', tit: '🌧️ Pioggia', val: boxPioggia(g) },\n    { bg: '#f8fafc', bd: '#e2e8f0', fg: '#475569', tit: '💨 Vento',\n      val: `${esc(g.vento_dir)} ${num(g.vento_kmh, ' km/h')}${piccolo(`raff. ${num(g.raffiche_kmh, ' km/h')}${g.finestra_vento ? ` · ${esc(g.finestra_vento)}` : ''}`)}` },\n    quartaCasella(g)\n  ];\n\n  return `\n    <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin-top:10px; border-collapse:separate; border-spacing:4px 0;\">\n      <tr>${celle.map(c => `\n        <td width=\"25%\" valign=\"top\" style=\"background:${c.bg}; border:1px solid ${c.bd}; border-radius:6px; padding:6px 3px; text-align:center;\">\n          <div style=\"font-size:9.5px; font-weight:700; color:${c.fg}; text-transform:uppercase; margin-bottom:2px;\">${c.tit}</div>\n          <div style=\"font-size:10.5px; font-weight:600; color:#0f172a; line-height:1.3;\">${c.val}</div>\n        </td>`).join('')}\n      </tr>\n    </table>`;\n}\n\n// Riga di sintesi: cielo, umidità e i fenomeni locali effettivamente attivi.\nfunction rigaSintesi(g) {\n  const pezzi = [`Cielo: ${esc(g.cielo)}`];\n  if (g.nuvolosita != null) pezzi.push(`copertura ${num(g.nuvolosita, '%')}`);\n  if (g.umidita != null) pezzi.push(`UR ${num(g.umidita, '%')}`);\n  if (g.finestra_pioggia) pezzi.push(`fenomeni ore ${esc(g.finestra_pioggia)}`);\n  if (g.convezione && g.convezione !== 'assente') pezzi.push(`convezione ${esc(g.convezione)}`);\n  if (g.foehn) pezzi.push(`foehn ${esc(g.foehn)}`);\n  if (g.inversione) pezzi.push(`inversione ${esc(g.inversione)}`);\n  return `<div style=\"font-size:11px; color:#64748b; margin-top:8px;\">${pezzi.join(' · ')}</div>`;\n}\n\nconst cronoHtml = (f.giorni || []).map(g => `\n      <div style=\"background:#ffffff; border:1px solid #e2e8f0; border-left:4px solid #0284c7; padding:12px 14px; margin-bottom:12px; border-radius:0 8px 8px 0; font-size:13px; line-height:1.55; color:#334155;\">\n        <strong style=\"color:#0f172a;\">${esc(g.titolo)}:</strong> ${esc(g.descrizione)}\n        ${rigaSintesi(g)}\n        ${statsTableHtml(g)}\n      </div>`).join('');\n\nconst fonte = meta.bollettino\n  ? `Fonte ufficiale: ${esc(meta.fonte)}, bollettino n° ${esc(meta.bollettino)} (emissione ${esc(meta.emissione || 'n/d')}).`\n  : 'Fonte ufficiale non disponibile in questa esecuzione.';\n\nconst avvisiHtml = (meta.avvisi || []).length\n  ? `<div style=\"max-width:620px;margin:0 auto 18px auto;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;color:#991b1b;font-size:11.5px;line-height:1.5;\">\n       <strong>Note di elaborazione:</strong> ${esc((meta.avvisi || []).join(' · '))}\n     </div>` : '';\n\nconst fullEmailHtml = `\n<!DOCTYPE html>\n<html lang=\"it\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>Bollettino Meteo — ${esc(f.citta)}</title>\n</head>\n<body style=\"margin:0; padding:20px 10px; background-color:#f1f5f9; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;\">\n  <div style=\"max-width:620px; margin:0 auto;\">\n    <div style=\"text-align:center; margin-bottom:22px;\">\n      <h1 style=\"color:#0f172a; font-size:20px; font-weight:800; margin:0 0 4px 0; letter-spacing:-0.3px;\">🌤️ Bollettino meteorologico</h1>\n      <div style=\"color:#64748b; font-size:12.5px; font-weight:500;\">${esc(f.citta)} · ${num(meta.quota, ' m s.l.m.')} · ${(meta.giorni || []).length} giorni</div>\n    </div>\n    ${avvisiHtml}\n    <div style=\"background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; margin-bottom:28px; overflow:hidden; box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);\">\n      <div style=\"background:linear-gradient(135deg, #0284c7, #0369a1); padding:14px 18px; color:#ffffff;\">\n        <h2 style=\"margin:0; font-size:17px; font-weight:700; letter-spacing:0.3px;\">📍 ${esc(String(f.citta || '').toUpperCase())}</h2>\n      </div>\n      <div style=\"padding:18px;\">\n        <div style=\"margin-bottom:18px;\">\n          <div style=\"font-size:11px; font-weight:700; text-transform:uppercase; color:#0284c7; letter-spacing:0.5px; margin-bottom:4px;\">Dinamica delle masse d'aria</div>\n          <p style=\"margin:0; font-size:13.5px; line-height:1.6; color:#334155;\">${esc(f.quadro_generale)}</p>\n        </div>\n        <div style=\"margin-bottom:18px;\">\n          <div style=\"font-size:11px; font-weight:700; text-transform:uppercase; color:#0284c7; letter-spacing:0.5px; margin-bottom:8px;\">Cronologia giorno per giorno</div>\n          ${cronoHtml}\n        </div>\n        <div style=\"background:#fffbeb; border:1px solid #fef3c7; border-left:4px solid #f59e0b; border-radius:6px; padding:10px 14px; font-size:12.5px; line-height:1.5; color:#92400e;\">\n          <div style=\"font-weight:700; margin-bottom:3px; color:#b45309;\">⚖️ Confronto modelli vs fonte ufficiale</div>\n          <strong style=\"color:#0f172a;\">Confidenza ${esc(f.confidenza || 'N/D')}:</strong> ${esc(f.confronto_ufficiale)}\n        </div>\n      </div>\n    </div>\n    <div style=\"text-align:center; color:#94a3b8; font-size:11px; line-height:1.5; margin-top:20px;\">\n      Elaborazione automatica: AROME HD / ICON-D2 / ICON-2I / ECMWF IFS / GFS.<br>\n      ${fonte}<br>\n      I valori numerici sono calcolati da script, non generati dal modello linguistico.\n    </div>\n  </div>\n</body>\n</html>`;\n\n// --- versione solo testo ----------------------------------------------------\nconst righe = [`BOLLETTINO METEO — ${f.citta}`, fonte, ''];\nrighe.push(f.quadro_generale || '');\n(f.giorni || []).forEach(g => {\n  righe.push('', `${g.titolo}: ${g.descrizione}`);\n  const parti = [\n    `Temp ${num(g.tmin, '', 1)}/${num(g.tmax, '°C', 1)} (perc. ${num(g.perc_min, '', 1)}/${num(g.perc_max, '°C', 1)})`,\n    `Pioggia ${num(g.pioggia_mm, ' mm', 1)} (prob. ${num(g.prob_pioggia, '%')})`,\n    `Vento ${g.vento_dir} ${num(g.vento_kmh, ' km/h')} raff. ${num(g.raffiche_kmh, ' km/h')}`\n  ];\n  if (f.riquadro === 'mare') parti.push(`Mare: ${g.mare}`);\n  if (f.riquadro === 'neve') parti.push(`Zero termico ${num(g.zero_termico_min, '', 0)}–${num(g.zero_termico_max, ' m', 0)}, neve ${num(g.neve_cm, ' cm', 1)}`);\n  if (f.riquadro === 'visibilita') parti.push(`Visibilità min ${num(g.vis_min, ' m')}${g.nebbia ? ` (nebbia ${g.nebbia})` : ''}`);\n  righe.push('  ' + parti.join(' · '));\n});\nrighe.push('', `Confidenza ${f.confidenza}: ${f.confronto_ufficiale || ''}`);\nif ((meta.avvisi || []).length) righe.push('', 'Note: ' + meta.avvisi.join(' · '));\n\nreturn [{\n  json: {\n    html: fullEmailHtml,\n    text: righe.join('\\n'),\n    citta: f.citta,\n    emails: src.emails,\n    chat_id: src.chat_id,\n    meta\n  }\n}];"
+      },
+      "id": "4ec10555-4e61-51b1-ad76-c6a3a46ecb3f",
+      "name": "Formatta HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('0. Config').first().json.email_mittente }}",
+        "toEmail": "={{ $('0. Config').first().json.email_mittente }}",
+        "subject": "=🌤️ Bollettino Meteo {{ $json.citta }} - {{ $now.setZone('Europe/Rome').toFormat('dd/MM/yyyy') }}",
+        "emailFormat": "both",
+        "text": "={{ $json.text }}",
+        "html": "={{ $json.html }}",
+        "options": {
+          "bccEmail": "={{ ($json.emails || []).join(',') }}",
+          "appendAttribution": false
+        }
+      },
+      "id": "2a5a56c9-4469-5a15-a6af-a0fa9e4bbeb0",
+      "name": "Invia Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1650,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $('0. Config').first().json.telegram_token + '/sendMessage' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Formatta HTML').item.json.chat_id, text: '✅ Bollettino per ' + $('Formatta HTML').item.json.citta + ' inviato a: ' + ($('Formatta HTML').item.json.emails || []).join(', ') }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "21b0e596-2db6-521f-b4bc-0826d4e0346b",
+      "name": "Conferma Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1860,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## 0. Configurazione\nToken Telegram, API key Gemini, **località e profili** stanno solo nel nodo `0. Config`.\n\nValorizzali con `TELEGRAM_BOT_TOKEN` e `GEMINI_API_KEY`, oppure incollali nei fallback dentro il nodo.\n\n⚠️ Se `allowed_chat_ids` resta vuoto, **chiunque** conosca il bot può far partire mail verso indirizzi arbitrari dal tuo SMTP.",
+        "height": 300,
+        "width": 420,
+        "color": 3
+      },
+      "id": "afa37942-af1f-57a3-9591-b734ecd69d56",
+      "name": "Nota 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1520,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Come si chiede il bollettino\nUn messaggio al bot nel formato:\n\n```\n<email> <località>\n```\n\nEsempi:\n- `mario@esempio.it garessio`\n- `a@b.com, c@d.it limone piemonte`\n\nI token con `@` sono email, il resto è il nome della località: funzionano sia più destinatari sia i nomi di due parole.\n\nRichieste malformate ricevono **risposta su Telegram** invece di sparire nel nulla.",
+        "height": 320,
+        "width": 400,
+        "color": 4
+      },
+      "id": "60c68605-d1cc-5b75-9e55-ded33aab218c",
+      "name": "Nota 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -680,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Profili di località\nIl profilo decide **cosa si scarica, cosa si calcola e la quarta casella**:\n\n| profilo | 4ª casella | fenomeni |\n|---|---|---|\n| costa | 🌊 Mare | — |\n| pianura | 🌫️ Visibilità | nebbia, inversione, foehn |\n| montagna | 🏔️ Zero termico | neve, foehn |\n| fondovalle | 🏔️ Zero termico | tutti |\n\nLa convezione (CAPE **+ shear**) si valuta ovunque.",
+        "height": 300,
+        "width": 440,
+        "color": 6
+      },
+      "id": "cde77bb0-eb26-55b8-a1ce-369c574bffb2",
+      "name": "Nota 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        370,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Quota Gemini\n**3 chiamate per bollettino** (2 micro-agenti + 1 Capo), tutte su Flash Lite: 500 richieste/giorno → ~166 bollettini.\n\n3.7 Flash si ferma a **20 al giorno**: come fallback bastano e avanzano.",
+        "height": 240,
+        "width": 400,
+        "color": 7
+      },
+      "id": "8f639d7b-f5ef-5a29-ac09-9905523a365b",
+      "name": "Nota 4",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        960,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Convezione onesta\nIl CAPE da solo non dice nulla. La classe combina energia, inibizione, **shear** e pioggia effettiva:\n\n- `inespressa` → c'è energia ma nessun modello bagna. **Non** è un temporale, e il prompt vieta di raccontarlo come tale.\n- `isolata` / `celle possibili` / `organizzata` → lo shear regge le celle.\n\nSenza questo incrocio 2330 J/kg con 0 mm di pioggia diventano un allarme.",
+        "height": 260,
+        "width": 420,
+        "color": 5
+      },
+      "id": "6b19d555-11d0-5365-b997-8bf1b8976238",
+      "name": "Nota 5",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        590,
+        700
+      ]
+    }
+  ],
+  "connections": {
+    "Poll Telegram": {
+      "main": [
+        [
+          {
+            "node": "0. Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "0. Config": {
+      "main": [
+        [
+          {
+            "node": "Get Offset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Offset": {
+      "main": [
+        [
+          {
+            "node": "Telegram getUpdates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram getUpdates": {
+      "main": [
+        [
+          {
+            "node": "Leggi Richiesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leggi Richiesta": {
+      "main": [
+        [
+          {
+            "node": "Risolvi Località",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Risolvi Località": {
+      "main": [
+        [
+          {
+            "node": "Richiesta Valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Richiesta Valida?": {
+      "main": [
+        [
+          {
+            "node": "Leggi Bollettino Ufficiale",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Messaggio di Errore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Messaggio di Errore": {
+      "main": [
+        [
+          {
+            "node": "Avvisa su Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Avvisa su Telegram": {
+      "main": [
+        []
+      ]
+    },
+    "Leggi Bollettino Ufficiale": {
+      "main": [
+        [
+          {
+            "node": "Prepara Bollettino Ufficiale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepara Bollettino Ufficiale": {
+      "main": [
+        [
+          {
+            "node": "Dati Open-Meteo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dati Open-Meteo": {
+      "main": [
+        [
+          {
+            "node": "Aggregatore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregatore": {
+      "main": [
+        [
+          {
+            "node": "Micro-Agenti",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Micro-Agenti": {
+      "main": [
+        [
+          {
+            "node": "Agente Capo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente Capo": {
+      "main": [
+        [
+          {
+            "node": "Validatore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validatore": {
+      "main": [
+        [
+          {
+            "node": "Formatta HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatta HTML": {
+      "main": [
+        [
+          {
+            "node": "Invia Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invia Email": {
+      "main": [
+        [
+          {
+            "node": "Conferma Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferma Telegram": {
+      "main": [
+        []
+      ]
+    },
+    "Gemini Flash Lite (primario)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Agente Capo",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini 3.7 Flash (fallback)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Agente Capo",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Rome",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

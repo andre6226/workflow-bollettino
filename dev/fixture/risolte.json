@@ -1,0 +1,159 @@
+[
+ {
+  "emails": [
+   "x@y.it"
+  ],
+  "localita_richiesta": "bordighera",
+  "chat_id": 1,
+  "errore": null,
+  "elenco_localita": "Bordighera, Genova Centro, Limone Piemonte, Torino, Garessio",
+  "citta": {
+   "id": "bordighera",
+   "nome": "Bordighera",
+   "lat": 43.7794,
+   "lon": 7.6697,
+   "quota": 10,
+   "regione": "liguria",
+   "rif": "Imperia",
+   "zona_mare": "ponente",
+   "profilo": "costa",
+   "alias": [
+    "bordighera",
+    "bordi"
+   ]
+  },
+  "citta_id": "bordighera",
+  "regione": "liguria",
+  "fenomeni": [],
+  "riquadro": "mare",
+  "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,cloud_cover_high,precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cape,convective_inhibition,temperature_850hPa,geopotential_height_500hPa,temperature_500hPa,wind_speed_500hPa,wind_direction_500hPa"
+ },
+ {
+  "emails": [
+   "x@y.it"
+  ],
+  "localita_richiesta": "genova",
+  "chat_id": 1,
+  "errore": null,
+  "elenco_localita": "Bordighera, Genova Centro, Limone Piemonte, Torino, Garessio",
+  "citta": {
+   "id": "genova",
+   "nome": "Genova Centro",
+   "lat": 44.4056,
+   "lon": 8.9463,
+   "quota": 20,
+   "regione": "liguria",
+   "rif": "Genova",
+   "zona_mare": "centro",
+   "profilo": "costa",
+   "alias": [
+    "genova",
+    "genova centro",
+    "genoa",
+    "ge"
+   ]
+  },
+  "citta_id": "genova",
+  "regione": "liguria",
+  "fenomeni": [],
+  "riquadro": "mare",
+  "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,cloud_cover_high,precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cape,convective_inhibition,temperature_850hPa,geopotential_height_500hPa,temperature_500hPa,wind_speed_500hPa,wind_direction_500hPa"
+ },
+ {
+  "emails": [
+   "x@y.it"
+  ],
+  "localita_richiesta": "limone piemonte",
+  "chat_id": 1,
+  "errore": null,
+  "elenco_localita": "Bordighera, Genova Centro, Limone Piemonte, Torino, Garessio",
+  "citta": {
+   "id": "limone",
+   "nome": "Limone Piemonte",
+   "lat": 44.2017,
+   "lon": 7.5769,
+   "quota": 1010,
+   "regione": "piemonte",
+   "rif": "CN",
+   "profilo": "montagna",
+   "alias": [
+    "limone",
+    "limone piemonte"
+   ]
+  },
+  "citta_id": "limone",
+  "regione": "piemonte",
+  "fenomeni": [
+   "neve",
+   "foehn"
+  ],
+  "riquadro": "neve",
+  "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,cloud_cover_high,precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cape,convective_inhibition,temperature_850hPa,geopotential_height_500hPa,temperature_500hPa,wind_speed_500hPa,wind_direction_500hPa,wind_speed_850hPa,wind_direction_850hPa,snowfall,snow_depth,freezing_level_height"
+ },
+ {
+  "emails": [
+   "x@y.it"
+  ],
+  "localita_richiesta": "torino",
+  "chat_id": 1,
+  "errore": null,
+  "elenco_localita": "Bordighera, Genova Centro, Limone Piemonte, Torino, Garessio",
+  "citta": {
+   "id": "torino",
+   "nome": "Torino",
+   "lat": 45.0703,
+   "lon": 7.6869,
+   "quota": 239,
+   "regione": "piemonte",
+   "rif": "TO",
+   "profilo": "pianura",
+   "alias": [
+    "torino",
+    "turin",
+    "to"
+   ]
+  },
+  "citta_id": "torino",
+  "regione": "piemonte",
+  "fenomeni": [
+   "nebbia",
+   "inversione",
+   "foehn"
+  ],
+  "riquadro": "visibilita",
+  "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,cloud_cover_high,precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cape,convective_inhibition,temperature_850hPa,geopotential_height_500hPa,temperature_500hPa,wind_speed_500hPa,wind_direction_500hPa,dew_point_2m,visibility,wind_speed_850hPa,wind_direction_850hPa"
+ },
+ {
+  "emails": [
+   "x@y.it"
+  ],
+  "localita_richiesta": "garessio",
+  "chat_id": 1,
+  "errore": null,
+  "elenco_localita": "Bordighera, Genova Centro, Limone Piemonte, Torino, Garessio",
+  "citta": {
+   "id": "garessio",
+   "nome": "Garessio",
+   "lat": 44.2033,
+   "lon": 8.0203,
+   "quota": 621,
+   "regione": "piemonte",
+   "rif": "CN",
+   "profilo": "fondovalle",
+   "alias": [
+    "garessio",
+    "val tanaro"
+   ]
+  },
+  "citta_id": "garessio",
+  "regione": "piemonte",
+  "fenomeni": [
+   "nebbia",
+   "inversione",
+   "foehn",
+   "neve"
+  ],
+  "riquadro": "neve",
+  "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,cloud_cover_high,precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cape,convective_inhibition,temperature_850hPa,geopotential_height_500hPa,temperature_500hPa,wind_speed_500hPa,wind_direction_500hPa,dew_point_2m,visibility,wind_speed_850hPa,wind_direction_850hPa,snowfall,snow_depth,freezing_level_height"
+ }
+]

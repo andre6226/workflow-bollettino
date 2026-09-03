@@ -1,0 +1,417 @@
+{
+  "name": "Aggiorna Bollettini Ufficiali",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 20
+            }
+          ]
+        }
+      },
+      "id": "83e01ef8-4892-5a6a-a163-0289b417c85c",
+      "name": "Ogni 20 Minuti",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -900,
+        320
+      ],
+      "notes": "Tutto il giorno: ARPA Piemonte ripubblica anche fuori orario."
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bollettini"
+        },
+        "matchType": "anyCondition",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "regione",
+              "condition": "isNotEmpty"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "b6dd2829-6add-5143-92b7-2f07486a09de",
+      "name": "Leggi Stato Corrente",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -680,
+        320
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "alwaysOutputData: alla prima esecuzione la tabella è vuota."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FONTI DA CONTROLLARE\n// ============================================================================\n// Riceve le righe già presenti nella Data table \"bollettini\" e produce un item\n// per ciascuna fonte ufficiale, con il Last-Modified dell'ultima copia scaricata.\n//\n// Quel valore serve al nodo successivo per fare una richiesta CONDIZIONALE:\n// se il file non è cambiato il server risponde 304 e non scarica un byte\n// (verificato su ARPAL). Quando non abbiamo ancora nulla si manda una data\n// del 1970, così la prima risposta è per forza un 200.\n// ============================================================================\n\nconst FONTI = [\n  {\n    regione: 'liguria',\n    provider: 'arpal',\n    nome_fonte: 'ARPAL Liguria',\n    url: 'https://www.arpal.liguria.it/images/pdfWS/bollettinoLiguria.pdf'\n  },\n  {\n    regione: 'piemonte',\n    provider: 'arpa_piemonte',\n    nome_fonte: 'ARPA Piemonte',\n    url: 'https://www.arpa.piemonte.it/rischi_naturali/boll/bollettino_meteotestuale.pdf'\n  }\n];\n\nconst MAI = 'Thu, 01 Jan 1970 00:00:00 GMT';\n\n// Le righe della tabella: alla primissima esecuzione la tabella è vuota e il\n// nodo di lettura (con alwaysOutputData) restituisce un item senza campi.\nconst stato = {};\nfor (const item of $input.all()) {\n  const r = item.json || {};\n  if (!r.regione) continue;\n  try {\n    stato[r.regione] = JSON.parse(r.testo_bollettino || '{}');\n  } catch (e) {\n    stato[r.regione] = null; // riga corrotta: la trattiamo come assente\n  }\n}\n\nreturn FONTI.map(f => {\n  const salvato = stato[f.regione] || null;\n  return {\n    json: {\n      ...f,\n      last_modified: salvato?.last_modified || MAI,\n      // Serve al parser come guardia: se il numero di bollettino non cambia,\n      // non riscriviamo la riga anche se il server ci ha dato un 200.\n      precedente: salvato ? { bollettino: salvato.bollettino || null } : null,\n      gia_presente: Boolean(salvato)\n    }\n  };\n});"
+      },
+      "id": "beb4f634-43c9-5836-9685-507f8f93b427",
+      "name": "Fonti da Controllare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "If-Modified-Since",
+              "value": "={{ $json.last_modified }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "redirect": {
+            "redirect": {}
+          },
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "b8bc16d3-71e9-5f59-aec1-d6a6e7397c25",
+      "name": "Scarica se Cambiato",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "Richiesta condizionale: se non è cambiato, 304 e zero byte scaricati."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FILTRA E RIABBINA\n// ============================================================================\n// Il nodo HTTP con fullResponse SOSTITUISCE il json dell'item con i metadati\n// della risposta (statusCode, headers): regione e provider andrebbero persi.\n// Qui li si riattacca abbinando per indice, si scartano le fonti che hanno\n// risposto 304 (nulla di nuovo) e si lascia passare il binario del PDF.\n//\n// L'abbinamento per indice è sicuro perché a monte non è stato scartato nulla:\n// il nodo HTTP produce esattamente un item per ogni fonte, anche in errore\n// (neverError + onError: continueRegularOutput).\n// ============================================================================\n\nconst fonti = $('Fonti da Controllare').all();\nconst risultati = [];\n\n$input.all().forEach((item, i) => {\n  const meta = fonti[i]?.json ?? {};\n  const stato = Number(item.json?.statusCode ?? 0);\n\n  // 304 = il file non è cambiato dall'ultimo giro. È il caso normale:\n  // su ~72 controlli al giorno ci aspettiamo 70 volte questo.\n  if (stato === 304) return;\n\n  if (stato !== 200) {\n    // Errore di rete o server giù: si riproverà tra 20 minuti, senza far\n    // fallire l'esecuzione né toccare quello che c'è già in tabella.\n    return;\n  }\n\n  if (!item.binary?.data) return;\n\n  // Il Last-Modified nuovo diventa quello da salvare per il prossimo confronto.\n  const headers = item.json?.headers || {};\n  const nuovoLM = headers['last-modified'] || headers['Last-Modified'] || meta.last_modified;\n\n  risultati.push({\n    json: { ...meta, statusCode: stato, last_modified: nuovoLM },\n    binary: item.binary\n  });\n});\n\nreturn risultati;"
+      },
+      "id": "2a9d6e79-cc81-5158-9cda-72e911b44335",
+      "name": "Filtra e Riabbina",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "2f084f44-b91e-5bd6-b21e-c981ec9232ec",
+      "name": "Estrai Testo PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        200,
+        320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// PARSER BOLLETTINO UFFICIALE (ARPAL Liguria / ARPA Piemonte)\n// ============================================================================\n// I due PDF sono impaginati diversamente ma condividono la stessa forma logica:\n// intestazioni di giorno + righe etichettate + una tabella di temperature per\n// località. Il motore a righe è comune, cambiano solo le etichette e il modo\n// di leggere la tabella.\n//\n// Nota sui PDF:\n//  - ARPAL serve un corpo multipart/form-data salvato su disco: il \"%PDF\" vero\n//    comincia al byte 131. Funziona perché i parser accettano l'header entro i\n//    primi 1024 byte, ma è fragile: se un giorno l'estrazione smette di\n//    funzionare senza motivo, la causa è quella.\n//  - ARPA Piemonte è un PDF pulito, con 84 h di validità (3 giorni estesi + la\n//    tendenza del quarto).\n//\n// L'output è un JSON unico per entrambi i provider, salvato come stringa nella\n// colonna testo_bollettino della Data table.\n// ============================================================================\n\n// Gli item arrivano da \"Estrai Testo PDF\", che e' 1:1 con l'input: si\n// riabbinano per indice ai metadati di \"Filtra e Riabbina\" (regione, provider,\n// bollettino gia' salvato). Niente dipendenze da pairedItem o da come il nodo\n// di estrazione tratta il json.\n\nconst MESI = {\n  gennaio: '01', febbraio: '02', marzo: '03', aprile: '04', maggio: '05', giugno: '06',\n  luglio: '07', agosto: '08', settembre: '09', ottobre: '10', novembre: '11', dicembre: '12'\n};\n\nfunction analizza(meta, testoGrezzo) {\nconst provider = meta.provider;\nconst regione = meta.regione;\nconst raw = String(testoGrezzo || '');\nconst lastModified = meta.last_modified || null;\nconst precedente = meta.precedente || null; // JSON gia' salvato, per la guardia\n\nconst out = {\n  regione,\n  provider,\n  ok: false,\n  bollettino: null,\n  emissione: null,\n  last_modified: lastModified,\n  recuperato_il: new Date().toISOString(),\n  situazione: '',\n  by_date: {},\n  tendenza: {},\n  rif_localita: {},\n  clean: '',\n  nota: ''\n};\n\nif (!raw.trim()) {\n  out.nota = 'PDF vuoto o non estraibile.';\n  out.clean = '(fonte ufficiale non disponibile)';\n  return { out, cambiato: false };\n}\n\nconst lines = raw.split(/\\r?\\n/).map(l => l.replace(/\\s+/g, ' ').trim());\nconst nonVuote = lines.filter(Boolean);\n\n// ---------------------------------------------------------------------------\n// Estrattore di sezioni etichettate, comune ai due provider.\n// Raccoglie le righe di continuazione (i PDF mandano a capo a metà frase)\n// fermandosi alla prossima etichetta, a una riga vuota o a rumore tabellare.\n// ---------------------------------------------------------------------------\nfunction sezioni(blocco, reEtichette, reRumore) {\n  const sez = {};\n  let corrente = null;\n  for (const line of blocco) {\n    const m = line.match(reEtichette);\n    if (m) {\n      corrente = m[1].toUpperCase().replace('UMIDITA', 'UMIDITÀ').replace('NUVOLOSITA', 'NUVOLOSITÀ');\n      sez[corrente] = m[2].trim();\n      continue;\n    }\n    if (corrente && line && !reRumore.test(line) && !/^\\d+([.,]\\d+)?$|^[<>-]|^0°/.test(line)) {\n      sez[corrente] += ' ' + line;\n      continue;\n    }\n    if (!line) corrente = null;\n  }\n  return sez;\n}\n\nfunction isoDa(giorno, meseNome, anno) {\n  const mese = MESI[String(meseNome).toLowerCase()];\n  if (!mese) return null;\n  return `${anno}-${mese}-${String(giorno).padStart(2, '0')}`;\n}\n\n// ===========================================================================\n// PROVIDER: ARPAL Liguria\n// ===========================================================================\nfunction parseArpal() {\n  const ETICHETTE = /^(CIELO E FENOMENI|VENTI|MARE|TEMPERATURE|UMIDIT[AÀ]|SEGNALAZIONI[^:]*)\\s*:\\s*(.*)$/i;\n  const RUMORE = /^(IL TEMPO|TEMP\\.|CLIMA|PROBABILIT|A \\.\\.\\.|MIN|MAX|PRECIPITAZIONI|BOLLETTINO|CENTRO FUNZIONALE|DI PROTEZIONE CIVILE|DATA EMISSIONE|VALIDIT|PROSSIMO AGGIORNAMENTO|ARPAL Via Bombrini|AgenziaArpal|ARPALiguria|\\d+\\/\\d+$)/i;\n  const CITTA = ['Imperia', 'Savona', 'Genova', 'Chiavari', 'La Spezia', 'Pieve Di Teco', 'Cairo Montenotte', 'Busalla', 'Varese Ligure'];\n  // Località di riferimento usate dalle città configurate nel bollettino\n  const RIF = ['Imperia', 'Genova'];\n\n  const mBoll = raw.match(/(\\d{1,4}\\/\\d{4})/);\n  if (mBoll) out.bollettino = mBoll[1];\n  const mEmi = raw.match(/(\\d{1,2}\\s+[A-Za-zÀ-ÿ]+\\s+\\d{4},\\s*\\d{1,2}:\\d{2})/);\n  if (mEmi) out.emissione = mEmi[1];\n\n  // Intestazioni giorno: \"Martedì 01 Settembre 2026\" (senza orario: i timbri di\n  // emissione e aggiornamento hanno lo stesso formato ma finiscono con hh:mm)\n  const reGiorno = /^(luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica)\\s+(\\d{1,2})\\s+([a-zà-ÿ]+)\\s+(\\d{4})/i;\n  const giorni = [];\n  lines.forEach((line, idx) => {\n    if (/\\d{1,2}:\\d{2}/.test(line)) return;\n    const m = line.match(reGiorno);\n    if (!m) return;\n    const iso = isoDa(m[2], m[3], m[4]);\n    if (iso) giorni.push({ idx, iso, etichetta: line });\n  });\n\n  giorni.forEach((g, i) => {\n    const fine = i + 1 < giorni.length ? giorni[i + 1].idx : lines.length;\n    const blocco = lines.slice(g.idx, fine);\n    const sez = sezioni(blocco, ETICHETTE, RUMORE);\n    const aff = blocco.join(' ').match(/affidabilit[aà]\\s+(alta|media|bassa)/i);\n\n    out.by_date[g.iso] = {\n      etichetta: g.etichetta,\n      cielo: (sez['CIELO E FENOMENI'] || '').trim(),\n      venti: (sez['VENTI'] || '').trim(),\n      mare: (sez['MARE'] || '').trim(),\n      temperature: (sez['TEMPERATURE'] || '').trim(),\n      umidita: (sez['UMIDITÀ'] || '').trim(),\n      segnalazioni: (sez['SEGNALAZIONI PROTEZIONE CIVILE'] || '').trim(),\n      affidabilita: aff ? aff[1].toLowerCase() : '',\n      zero_termico: ''\n    };\n  });\n\n  // Situazione sinottica (compare una sola volta, sul primo giorno)\n  const iSit = lines.findIndex(l => /^SITUAZIONE ED EVOLUZIONE/i.test(l));\n  if (iSit !== -1) {\n    const buf = [];\n    for (let i = iSit + 1; i < lines.length; i++) {\n      const l = lines[i];\n      if (ETICHETTE.test(l)) break;\n      if (!l || RUMORE.test(l) || /^\\d+([.,]\\d+)?$|^[<>-]/.test(l)) continue;\n      if (l.length < 12) continue;\n      buf.push(l);\n    }\n    out.situazione = buf.join(' ').trim();\n  }\n\n  // Tabella temperature: nell'ordine dello stream, <città> <min> <max> <climaMin> <climaMax> <prob>\n  const gruppi = [];\n  let corrente = null;\n  nonVuote.forEach(t => {\n    if (CITTA.includes(t)) {\n      if (t === CITTA[0]) { corrente = {}; gruppi.push(corrente); }\n      if (corrente) corrente._c = t;\n      return;\n    }\n    if (corrente && corrente._c) {\n      corrente[corrente._c] = corrente[corrente._c] || [];\n      if (corrente[corrente._c].length < 5) corrente[corrente._c].push(t);\n    }\n  });\n  gruppi.forEach((g, i) => {\n    const iso = giorni[i]?.iso;\n    if (!iso) return;\n    const r = {};\n    RIF.forEach(c => {\n      const v = g[c] || [];\n      const min = Number(v[0]), max = Number(v[1]);\n      if (Number.isFinite(min) && Number.isFinite(max)) r[c] = { min, max, prob_prec: v[4] || '' };\n    });\n    if (Object.keys(r).length) out.rif_localita[iso] = r;\n  });\n\n  // Tabella \"Tendenza\": date in colonna, poi i valori a gruppi di 4\n  const iTend = lines.findIndex(l => /^Tendenza$/i.test(l));\n  if (iTend !== -1) {\n    const coda = lines.slice(iTend).filter(Boolean);\n    const date = [];\n    coda.forEach(l => {\n      const m = l.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);\n      if (m) date.push(`${m[3]}-${m[2]}-${m[1]}`);\n    });\n    const iAff = coda.findIndex(l => /^AFFIDABILIT[AÀ]$/i.test(l));\n    if (iAff !== -1 && date.length) {\n      const valori = coda.slice(iAff + 1).filter(l =>\n        !/^ARPAL Via Bombrini|^AgenziaArpal|^ARPALiguria|^\\d+\\/\\d+$/i.test(l));\n      date.forEach((iso, i) => {\n        const b = valori.slice(i * 4, i * 4 + 4);\n        if (b.length === 4) {\n          out.tendenza[iso] = { previsioni: b[0], temperature: b[1], venti: b[2], affidabilita: b[3] };\n        }\n      });\n    }\n  }\n}\n\n// ===========================================================================\n// PROVIDER: ARPA Piemonte\n// ===========================================================================\nfunction parseArpaPiemonte() {\n  const ETICHETTE = /^(NUVOLOSIT[AÀ]|PRECIPITAZIONI|ZERO TERMICO|VENTI|TEMPERATURE)\\s*:\\s*(.*)$/i;\n  const RUMORE = /^(Bollettino Meteo|BOLLETTINO N|DATA EMISSIONE|VALIDIT|AGGIORNAMENTO|SERVIZIO A CURA|AMBITO|Dipartimento|Regione Piemonte|Notte\\/Mattina|Pomeriggio\\/Sera|°C Min Max|Attendibilit)/i;\n  // Sigle delle province + le fasce di quota della tabella\n  const SIGLE = ['AL', 'AT', 'BI', 'CN', 'NO', 'TO', 'VB', 'VC'];\n  const QUOTE = ['700', '1500', '2000'];\n\n  const mBoll = raw.match(/(\\d{1,4}\\/\\d{4})/);\n  if (mBoll) out.bollettino = mBoll[1];\n  const mEmi = raw.match(/(\\d{2}\\/\\d{2}\\/\\d{4}\\s+ore\\s+\\d{1,2}:\\d{2})/i);\n  if (mEmi) out.emissione = mEmi[1];\n\n  // Intestazioni giorno: \"martedì, 01 settembre 2026\" (minuscolo, con virgola)\n  const reGiorno = /^(luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica),\\s*(\\d{1,2})\\s+([a-zà-ÿ]+)\\s+(\\d{4})/i;\n  const reTendenza = /^Tendenza per\\s+(luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica),\\s*(\\d{1,2})\\s+([a-zà-ÿ]+)\\s+(\\d{4})/i;\n\n  const giorni = [];\n  let idxTendenza = -1;\n  let isoTendenza = null;\n\n  lines.forEach((line, idx) => {\n    const t = line.match(reTendenza);\n    if (t) {\n      idxTendenza = idx;\n      isoTendenza = isoDa(t[2], t[3], t[4]);\n      return;\n    }\n    const m = line.match(reGiorno);\n    if (!m) return;\n    const iso = isoDa(m[2], m[3], m[4]);\n    if (iso) giorni.push({ idx, iso, etichetta: line });\n  });\n\n  const fineEstesa = idxTendenza !== -1 ? idxTendenza : lines.length;\n\n  giorni.forEach((g, i) => {\n    const fine = i + 1 < giorni.length ? giorni[i + 1].idx : fineEstesa;\n    const blocco = lines.slice(g.idx, fine);\n    const sez = sezioni(blocco, ETICHETTE, RUMORE);\n    // Qui l'attendibilità è un numero: \"Attendibilità: 95%\"\n    const att = blocco.join(' ').match(/attendibilit[aà]\\s*:?\\s*(\\d{1,3})\\s*%/i);\n\n    out.by_date[g.iso] = {\n      etichetta: g.etichetta,\n      cielo: (sez['NUVOLOSITÀ'] || '').trim(),\n      precipitazioni: (sez['PRECIPITAZIONI'] || '').trim(),\n      venti: (sez['VENTI'] || '').trim(),\n      zero_termico: (sez['ZERO TERMICO'] || '').trim(),\n      temperature: (sez['TEMPERATURE'] || '').trim(),\n      mare: '', // il Piemonte non ha costa\n      umidita: '',\n      segnalazioni: '',\n      affidabilita: att ? `${att[1]}%` : ''\n    };\n    // Il campo \"cielo\" per l'Agente Capo unisce nuvolosità e precipitazioni:\n    // ARPAL le tiene su una riga sola, qui sono separate.\n    const p = out.by_date[g.iso].precipitazioni;\n    if (p) out.by_date[g.iso].cielo = [out.by_date[g.iso].cielo, `Precipitazioni: ${p}`].filter(Boolean).join(' ');\n  });\n\n  // Situazione sinottica: paragrafo dopo \"Situazione ed evoluzione\"\n  const iSit = lines.findIndex(l => /^Situazione ed evoluzione/i.test(l));\n  if (iSit !== -1) {\n    const buf = [];\n    for (let i = iSit + 1; i < lines.length; i++) {\n      const l = lines[i];\n      if (reGiorno.test(l) || ETICHETTE.test(l)) break;\n      if (!l || RUMORE.test(l)) continue;\n      if (l.length < 12) continue;\n      buf.push(l);\n    }\n    out.situazione = buf.join(' ').trim();\n  }\n\n  // Tabella temperature: blocchi \"°C Min Max\" seguiti da <sigla> <min> <max>,\n  // poi le fasce di quota e \"0° NNNNm\".\n  const blocchiTab = [];\n  let corrente = null;\n  nonVuote.forEach(t => {\n    if (/^°C Min Max$/i.test(t)) { corrente = { valori: {}, quote: {}, zero: null }; blocchiTab.push(corrente); return; }\n    if (!corrente) return;\n    const mZero = t.match(/^0°\\s*(\\d{3,4})\\s*m$/i);\n    if (mZero) { corrente.zero = Number(mZero[1]); return; }\n    const m = t.match(/^([A-Z]{2}|700|1500|2000)\\s+(-?\\d{1,2})\\s+(-?\\d{1,2})$/);\n    if (!m) return;\n    const chiave = m[1];\n    const rec = { min: Number(m[2]), max: Number(m[3]) };\n    if (QUOTE.includes(chiave)) corrente.quote[chiave] = rec;\n    else if (SIGLE.includes(chiave)) corrente.valori[chiave] = rec;\n  });\n\n  blocchiTab.forEach((b, i) => {\n    const iso = giorni[i]?.iso;\n    if (!iso) return;\n    const r = {};\n    SIGLE.forEach(s => { if (b.valori[s]) r[s] = b.valori[s]; });\n    QUOTE.forEach(q => { if (b.quote[q]) r[`quota_${q}m`] = b.quote[q]; });\n    if (b.zero !== null) r.zero_termico_m = b.zero;\n    if (Object.keys(r).length) out.rif_localita[iso] = r;\n  });\n\n  // Tendenza del quarto giorno: stesse etichette, un blocco solo\n  if (idxTendenza !== -1 && isoTendenza) {\n    const blocco = lines.slice(idxTendenza);\n    const sez = sezioni(blocco, ETICHETTE, RUMORE);\n    const att = blocco.join(' ').match(/attendibilit[aà]\\s*:?\\s*(\\d{1,3})\\s*%/i);\n    const previsioni = [sez['NUVOLOSITÀ'], sez['PRECIPITAZIONI'] ? `Precipitazioni: ${sez['PRECIPITAZIONI']}` : '']\n      .filter(Boolean).join(' ').trim();\n    out.tendenza[isoTendenza] = {\n      previsioni,\n      temperature: (sez['TEMPERATURE'] || '').trim(),\n      venti: (sez['VENTI'] || '').trim(),\n      zero_termico: (sez['ZERO TERMICO'] || '').trim(),\n      affidabilita: att ? `${att[1]}%` : ''\n    };\n  }\n}\n\n// ===========================================================================\ntry {\n  if (provider === 'arpal') parseArpal();\n  else if (provider === 'arpa_piemonte') parseArpaPiemonte();\n  else throw new Error(`Provider sconosciuto: ${provider}`);\n\n  out.ok = Object.keys(out.by_date).length > 0;\n\n  // --- testo compatto per il prompt dell'Agente Capo -----------------------\n  const etichettaFonte = provider === 'arpal' ? 'ARPAL Liguria' : 'ARPA Piemonte';\n  const parti = [`BOLLETTINO ${etichettaFonte} ${out.bollettino || ''} — emissione ${out.emissione || 'n/d'}`];\n  if (out.situazione) parti.push(`\\nSITUAZIONE ED EVOLUZIONE:\\n${out.situazione}`);\n\n  Object.entries(out.by_date).forEach(([iso, d]) => {\n    const rif = out.rif_localita[iso] || {};\n    const righeRif = Object.entries(rif)\n      .map(([k, v]) => (v && typeof v === 'object' && 'min' in v)\n        ? `${k}: ${v.min}/${v.max} °C${v.prob_prec ? ` (prob. prec. ${v.prob_prec})` : ''}`\n        : (k === 'zero_termico_m' ? `zero termico ${v} m` : null))\n      .filter(Boolean).join(' | ');\n\n    parti.push([\n      `\\n--- ${iso} (${d.etichetta}) — attendibilità dichiarata: ${d.affidabilita || 'n/d'} ---`,\n      d.cielo ? `CIELO E FENOMENI: ${d.cielo}` : null,\n      d.venti ? `VENTI: ${d.venti}` : null,\n      d.mare ? `MARE: ${d.mare}` : null,\n      d.zero_termico ? `ZERO TERMICO: ${d.zero_termico}` : null,\n      d.temperature ? `TENDENZA TERMICA: ${d.temperature}` : null,\n      d.umidita ? `UMIDITÀ: ${d.umidita}` : null,\n      d.segnalazioni ? `SEGNALAZIONI PROT. CIVILE: ${d.segnalazioni}` : null,\n      righeRif ? `RIFERIMENTI UFFICIALI: ${righeRif}` : null\n    ].filter(Boolean).join('\\n'));\n  });\n\n  const tend = Object.entries(out.tendenza);\n  if (tend.length) {\n    parti.push('\\n--- TENDENZA (giorni successivi, bassa risoluzione) ---');\n    tend.forEach(([iso, t]) => {\n      parti.push(`${iso}: ${t.previsioni} | temp: ${t.temperature} | venti: ${t.venti}${t.zero_termico ? ` | zero termico: ${t.zero_termico}` : ''} | attendibilità: ${t.affidabilita}`);\n    });\n  }\n\n  out.clean = parti.join('\\n').trim();\n\n  if (!out.ok || out.clean.length < 200) {\n    out.nota = 'Parsing strutturato non riuscito: uso il testo grezzo troncato.';\n    out.clean = raw.slice(0, 6000);\n  }\n} catch (e) {\n  out.nota = `Errore parsing (${e.message}): uso il testo grezzo troncato.`;\n  out.clean = raw.slice(0, 6000);\n}\n\n// ---------------------------------------------------------------------------\n// Guardia di contenuto: seconda linea di difesa se la richiesta condizionale\n// non dovesse restituire 304. Se il numero di bollettino è lo stesso già\n// salvato, non c'è niente di nuovo da scrivere.\n// ---------------------------------------------------------------------------\nconst cambiato = !(precedente && out.bollettino && precedente.bollettino === out.bollettino);\nif (!cambiato) out.nota = `Bollettino ${out.bollettino} già presente in tabella: nessuna riscrittura.`;\n\nreturn { out, cambiato };\n}\n\n// ---------------------------------------------------------------------------\nconst metaItems = $('Filtra e Riabbina').all();\n\nreturn $input.all().map((item, i) => {\n  const meta = metaItems[i]?.json ?? {};\n  const { out, cambiato } = analizza(meta, item.json.text);\n  return {\n    json: {\n      regione: out.regione,\n      provider: out.provider,\n      cambiato,\n      bollettino: out.bollettino,\n      ok: out.ok,\n      nota: out.nota,\n      // È questo che finisce nella colonna testo_bollettino\n      testo_bollettino: JSON.stringify(out)\n    }\n  };\n});"
+      },
+      "id": "8775a700-1c27-54f5-955d-1600c78432cb",
+      "name": "Parser Bollettino Ufficiale",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cambiato",
+              "leftValue": "={{ $json.cambiato }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f545e3a2-3bb0-5b76-b1be-18dded1f9b9f",
+      "name": "Solo se Cambiato",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        640,
+        320
+      ],
+      "notes": "Seconda rete di sicurezza: stesso numero di bollettino = niente scrittura."
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bollettini"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "regione",
+              "condition": "eq",
+              "keyValue": "={{ $json.regione }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "regione": "={{ $json.regione }}",
+            "testo_bollettino": "={{ $json.testo_bollettino }}"
+          },
+          "schema": [
+            {
+              "id": "regione",
+              "displayName": "regione",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "testo_bollettino",
+              "displayName": "testo_bollettino",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        }
+      },
+      "id": "1792945e-a15f-5605-afa5-686817c16588",
+      "name": "Salva Bollettino",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        860,
+        320
+      ],
+      "notes": "Upsert su regione: una riga per regione, sempre l'ultima versione."
+    },
+    {
+      "parameters": {
+        "content": "## A cosa serve\nTiene aggiornata la Data table **`bollettini`** con l'ultima versione del bollettino ufficiale di ogni regione.\n\nIl workflow del bollettino su richiesta legge da qui invece di riscaricare 1,4 MB di PDF a ogni messaggio Telegram.\n\n**Una riga per regione**, sovrascritta in upsert.",
+        "height": 300,
+        "width": 420,
+        "color": 4
+      },
+      "id": "ab26b760-d654-5356-ae70-9f84de449419",
+      "name": "Nota 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -920,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Come capisce che è cambiato\nDue controlli in cascata:\n\n1. **`If-Modified-Since`** → il server risponde `304` e non manda un byte (verificato su ARPAL). È il caso normale: su ~72 controlli al giorno, ~70 finiscono qui.\n2. **Numero di bollettino** → se il file è stato ripubblicato ma il contenuto è lo stesso, il filtro blocca comunque la scrittura.\n\n⚠️ Orari reali osservati: ARPAL pubblica verso le **12:33**, ARPA Piemonte dichiara le **14:00** ma il file risultava ritoccato anche alle **23:35**. Per questo si controlla tutto il giorno.",
+        "height": 300,
+        "width": 470,
+        "color": 3
+      },
+      "id": "6976e079-f708-5abf-aa8f-d1cbf9df6b8e",
+      "name": "Nota 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Cosa finisce in tabella\n`testo_bollettino` contiene un **JSON** (non testo piatto), così non si perde la struttura:\n\n- `clean` → testo compatto pronto per il prompt\n- `by_date` → cielo / venti / mare / zero termico e attendibilità per data\n- `tendenza` → il 4° giorno\n- `rif_localita` → temperature ufficiali (province, fasce di quota, zero termico)\n\nNessuna colonna aggiuntiva richiesta.",
+        "height": 300,
+        "width": 460,
+        "color": 6
+      },
+      "id": "acbc45f0-7762-502f-a2e5-93f0de74e17d",
+      "name": "Nota 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        420,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Il PDF di ARPAL è malformato\nNon è un PDF pulito: è un corpo `multipart/form-data` salvato su disco per errore, con il `%PDF` vero al **byte 131**.\n\nFunziona perché i parser accettano l'header entro i primi 1024 byte. Se un giorno l'estrazione smette di funzionare senza motivo apparente, la causa è questa.\n\nARPA Piemonte invece è regolare.",
+        "height": 260,
+        "width": 420,
+        "color": 7
+      },
+      "id": "df918a38-aed3-5167-a50d-985f72148123",
+      "name": "Nota 4",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        560
+      ]
+    }
+  ],
+  "connections": {
+    "Ogni 20 Minuti": {
+      "main": [
+        [
+          {
+            "node": "Leggi Stato Corrente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leggi Stato Corrente": {
+      "main": [
+        [
+          {
+            "node": "Fonti da Controllare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fonti da Controllare": {
+      "main": [
+        [
+          {
+            "node": "Scarica se Cambiato",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scarica se Cambiato": {
+      "main": [
+        [
+          {
+            "node": "Filtra e Riabbina",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtra e Riabbina": {
+      "main": [
+        [
+          {
+            "node": "Estrai Testo PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Estrai Testo PDF": {
+      "main": [
+        [
+          {
+            "node": "Parser Bollettino Ufficiale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser Bollettino Ufficiale": {
+      "main": [
+        [
+          {
+            "node": "Solo se Cambiato",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Solo se Cambiato": {
+      "main": [
+        [
+          {
+            "node": "Salva Bollettino",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salva Bollettino": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Rome",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
