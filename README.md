@@ -55,3 +55,9 @@ della località. Le richieste malformate ricevono una risposta di errore.
 
 I JSON non si modificano a mano — vedi [`dev/README.md`](dev/README.md) per
 rigenerarli e per la suite di test che gira senza n8n e senza consumare quota.
+
+## Licenza
+
+Il codice è distribuito con licenza MIT: vedi [LICENSE](LICENSE). I dati di
+esempio in `dev/fixture/` (bollettini ARPAL e ARPA Piemonte, risposte
+Open-Meteo) restano soggetti alle condizioni d'uso delle rispettive fonti.
