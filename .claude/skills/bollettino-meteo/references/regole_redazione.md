@@ -1,7 +1,8 @@
 # Regole di redazione del bollettino
 
-Sono le stesse regole dell'Agente Capo del workflow n8n
-(`dev/js/b09_prompt_capo.txt`): se cambi l'una, aggiorna l'altra.
+Partono dalle regole dell'Agente Capo del workflow n8n
+(`dev/js/b09_prompt_capo.txt`): se cambi quelle comuni, aggiorna anche
+l'altro file. Le parti su BOLAM e MOLOCH esistono solo nella skill.
 
 ## Ruolo
 
@@ -55,31 +56,55 @@ calcolate (`rinforzi ore …`, `fenomeni ore …`, `NEBBIA ore …`, `Foehn …`
 senza modificarle. Esempi: "rinforzi tra le 12 e le 15", "nebbia fino alle 8",
 "fenomeni assenti per l'intera giornata".
 
+Gli orari ricavati da BOLAM e MOLOCH (vedi `arpal_note.md`) si possono usare
+in aggiunta, mai al posto di quelli calcolati: sono a passo di 3 h, quindi
+scrivili come fasce larghe ("in mattinata", "tra l'alba e la tarda mattinata",
+"dalla sera") o come orari delle mappe ("verso le 8"), e attribuiscili ai
+modelli quando divergono da quelli calcolati ("i modelli ad alta risoluzione
+anticipano i fenomeni alla notte").
+
 Mai "registrato/registrata/registrati": usa "previsto", "atteso", "modellato".
 Il tempo verbale è sempre al futuro.
 
 ## Lunghezza — requisito vincolante
 
-Ogni `descrizione` giornaliera: **4-5 frasi complete, almeno 60 parole**
+Ogni `descrizione` giornaliera: **5-6 frasi complete, almeno 80 parole**
 (sotto le 35 `finalizza.js` lo segnala negli avvisi).
 
 Ogni giornata contiene, in quest'ordine:
-1. copertura nuvolosa e come evolve nella giornata;
+1. copertura nuvolosa e come evolve nella giornata, **scandita con la
+   sequenza di BOLAM/MOLOCH** (quando si chiude, quando si apre);
 2. finestra oraria dei fenomeni o del vento (o l'esplicita assenza);
-3. eventuale nota di stabilità, solo se la classe di convezione la giustifica;
-4. i fenomeni locali del profilo, se presenti (nebbia, foehn, inversione, neve);
-5. percezione termica, ricavata dallo scarto fra temperatura reale e percepita
+3. **la lettura di BOLAM e MOLOCH** per quel giorno, dalla scheda del giorno
+   in `arpal_note.md`: da dove arrivano i fenomeni e verso dove si spostano,
+   se il nucleo più intenso cade sulla località o a qualche km (in che
+   direzione: "più a levante, verso il Tigullio"), quando passa il fronte o
+   cambia la massa d'aria, rotazioni del vento. Se i due modelli divergono tra
+   loro o da Open-Meteo, dillo con una formula prudente;
+4. eventuale nota di stabilità, solo se la classe di convezione la giustifica
+   (le mappe dell'energia convettiva possono dire *dove* e *quando*, non
+   cambiare la classe);
+5. i fenomeni locali del profilo, se presenti (nebbia, foehn, inversione, neve);
+6. percezione termica, ricavata dallo scarto fra temperatura reale e percepita
    e dall'umidità, senza citarne i valori.
+
+Copertura dei modelli ARPAL: MOLOCH arriva a +48 h, BOLAM a +72 h. Per i
+giorni non coperti il punto 3 si omette (e si torna a 4-5 frasi, 60+ parole);
+per i giorni coperti solo da BOLAM, scrivi che il dettaglio locale è meno
+affidabile. Non nominare mai "CAPE" o "shear" anche quando li leggi sulle
+mappe; i nomi dei modelli (BOLAM, MOLOCH) invece si possono scrivere.
 
 Esempio del respiro giusto (imita la forma, non il contenuto):
 
 > Giornata di cielo poco nuvoloso, con qualche velatura in transito nelle ore
 > centrali e schiarite ampie verso sera. Non sono attesi fenomeni: la
 > ventilazione resta debole, con un rinforzo di brezza tra le 12 e le 15 lungo
-> la costa. L'energia presente in quota resta inespressa e non porta a
-> rovesci. Le temperature si mantengono su valori superiori alla media, e
-> l'umidità elevata rende la percezione più pesante di quanto indichi il
-> termometro, specie nelle ore pomeridiane.
+> la costa. BOLAM e MOLOCH mostrano la nuvolosità più compatta confinata sui
+> rilievi alle spalle della città nel pomeriggio, con il mare sgombro e una
+> rotazione della brezza da sud verso sera. L'energia presente in quota resta
+> inespressa e non porta a rovesci. Le temperature si mantengono su valori
+> superiori alla media, e l'umidità elevata rende la percezione più pesante di
+> quanto indichi il termometro, specie nelle ore pomeridiane.
 
 ## Output — `testo.json`
 

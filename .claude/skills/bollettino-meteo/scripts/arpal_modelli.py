@@ -206,6 +206,7 @@ def main():
     out.mkdir(exist_ok=True)
 
     righe_md = [f'# Modelli ARPAL — {citta["nome"]}', '']
+    istanti = {}  # modello -> istanti di validità disponibili (ora locale)
     for modello, variabili in VARIABILI.items():
         try:
             corsa = ultima_corsa(modello)
@@ -241,6 +242,9 @@ def main():
                 tav, nome = tavola_locale(fotogrammi, corsa, citta, titolo, modello), f'{modello}_{prefisso}.png'
             tav.save(out / nome, optimize=True)
             scad = list(fotogrammi)
+            if titolo != SINOTTICA[2] + ' (mappe intere ogni 12 h)':
+                istanti.setdefault(modello.split('_')[0].upper(), set()).update(
+                    validita(corsa, x) for x in scad)
             a, b = validita(corsa, scad[0]), validita(corsa, scad[-1])
             v0 = a if v0 is None or a < v0 else v0
             v1 = b if v1 is None or b > v1 else v1
@@ -253,6 +257,35 @@ def main():
 
     (cartella / 'arpal.md').write_text('\n'.join(righe_md) + '\n')
     print(f'indice: {cartella / "arpal.md"}')
+    # Riscritta a ogni esecuzione: nuove tavole, nuova lettura.
+    scheda = cartella / 'arpal_note.md'
+    scheda.write_text(scheda_giorni(contesto.get('giorni_previsti') or [], istanti))
+    print(f'scheda da compilare: {scheda}')
+
+
+def scheda_giorni(giorni, istanti):
+    """Scheletro per giorno di arpal_note.md: lo compila Claude guardando le
+    tavole, e da lì passa nelle descrizioni giornaliere."""
+    r = ['# Lettura di BOLAM e MOLOCH, giorno per giorno', '',
+         'Compila ogni giorno coperto PRIMA di scrivere testo.json: una riga per',
+         'fascia di 3 h in cui cambia qualcosa sul mirino o nei dintorni',
+         '(pioggia, nubi, vento, energia convettiva, massa d\'aria, temperatura).',
+         'Chiudi ogni giorno con la sintesi da portare nella descrizione.', '']
+    for iso in giorni:
+        d = dt.date.fromisoformat(iso)
+        r.append(f'## {iso} ({GIORNI[d.weekday()]} {d:%d})')
+        coperto = False
+        for nome, tempi in sorted(istanti.items(), reverse=True):  # MOLOCH prima
+            ore = sorted(t.hour for t in tempi if t.date() == d)
+            if ore:
+                coperto = True
+                r.append(f'- {nome}: fotogrammi alle ore {", ".join(f"{h:02d}" for h in ore)}')
+        if not coperto:
+            r += ['- nessun modello ARPAL copre questo giorno: niente punto BOLAM/MOLOCH nella descrizione', '']
+            continue
+        r += ['', '| fascia | MOLOCH | BOLAM |', '|---|---|---|', '|  |  |  |', '',
+              '**Sintesi per la descrizione:** ', '']
+    return '\n'.join(r) + '\n'
 
 
 if __name__ == '__main__':

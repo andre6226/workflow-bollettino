@@ -42,19 +42,25 @@ Gli script stanno in `scripts/` accanto a questo file (chiamalo `$SKILL`).
    scarica **tutte le scadenze** (ogni 3 h, il passo più fitto pubblicato:
    MOLOCH fino a +48 h, BOLAM fino a +72 h) e compone per ogni variabile una
    tavola in sequenza temporale, ritagliata sulla località (mirino) e con la
-   scala colori. L'indice è `<cartella>/arpal.md`. Se il sito non risponde,
-   prosegui senza e dillo nel `confronto_ufficiale`.
+   scala colori. L'indice è `<cartella>/arpal.md`; crea anche lo scheletro
+   `<cartella>/arpal_note.md`, una scheda per ogni giorno del bollettino con
+   gli istanti coperti da ciascun modello (rilanciare lo script la azzera).
+   Se il sito non risponde, prosegui senza e dillo nel `confronto_ufficiale`.
 
 3. **Leggi** `<cartella>/dati.md` per intero,
    [`references/regole_redazione.md`](references/regole_redazione.md) e
    [`references/modelli_arpal.md`](references/modelli_arpal.md); poi **apri
    con Read ogni tavola elencata in `arpal.md`** e segui fotogramma per
    fotogramma come cambia il campo sul mirino (vedi `modelli_arpal.md`).
+   **Compila `arpal_note.md`**: per ogni giorno coperto, la tabella a fasce di
+   3 h (MOLOCH e BOLAM affiancati) e la sintesi da portare nella descrizione.
 
 4. **Ragiona e scrivi** `<cartella>/testo.json` seguendo le regole: diagnosi in
    quota e al suolo giorno per giorno, confronto tra Open-Meteo, BOLAM/MOLOCH e
    fonte ufficiale, classe di convezione rispettata alla lettera, orari
-   ricopiati, niente numeri fisici, 60+ parole per giorno.
+   ricopiati, niente numeri fisici. **Ogni descrizione di un giorno coperto da
+   BOLAM/MOLOCH contiene la sintesi della sua scheda in `arpal_note.md`**
+   (evoluzione, collocazione dei nuclei, passaggio del fronte): 80+ parole.
 
 5. **Finalizza**
 
@@ -67,9 +73,9 @@ Gli script stanno in `scripts/` accanto a questo file (chiamalo `$SKILL`).
    quelle giornate e rilancia.
 
 6. **Consegna**: mostra all'utente il contenuto di `bollettino.txt` (è breve),
-   poi una sezione "Evoluzione secondo BOLAM e MOLOCH" con la sequenza
-   ricavata dalle tavole (blocchi di 3 h in ora locale, solo quelli in cui
-   cambia qualcosa), il percorso di `bollettino.html` e gli avvisi. Non inviare
+   poi una sezione "Evoluzione secondo BOLAM e MOLOCH" ricavata da
+   `arpal_note.md` (blocchi di 3 h in ora locale, solo quelli in cui cambia
+   qualcosa), il percorso di `bollettino.html` e gli avvisi. Non inviare
    mail: se l'utente vuole spedirla, chiedi conferma prima.
 
 ## Note

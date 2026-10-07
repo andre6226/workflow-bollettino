@@ -42,9 +42,16 @@ nell'area attorno (fino a qualche decina di km, cioè ciò che sta per arrivare)
 
 ## Come usarle nel bollettino
 
-- Sono una **terza fonte**, accanto a Open-Meteo e al bollettino ufficiale.
-  I numeri restano quelli dell'aggregatore: dalle mappe ricavi tempi, forme,
-  provenienze ed evoluzione, non valori da scrivere.
+- Sono una **terza fonte**, accanto a Open-Meteo e al bollettino ufficiale,
+  e **entrano in ogni descrizione giornaliera** dei giorni che coprono,
+  attraverso la scheda di quel giorno in `arpal_note.md` (vedi il punto 3
+  della struttura in `regole_redazione.md`). I numeri restano quelli
+  dell'aggregatore: dalle mappe ricavi tempi, forme, provenienze ed
+  evoluzione, non valori da scrivere.
+- Compila la scheda prima di scrivere: una riga per fascia di 3 h in cui
+  cambia qualcosa, con MOLOCH e BOLAM affiancati (es. "05-08 | nucleo intenso
+  su Tigullio, margine su Genova | fascia moderata sulla costa, più forte a
+  est"), poi una sintesi di 1-2 frasi già in linguaggio da bollettino.
 - MOLOCH è il riferimento migliore per **dove** cadono i fenomeni intensi in
   Liguria e basso Piemonte (risolve l'orografia meglio dei modelli globali).
   Se MOLOCH colloca il massimo a pochi km dal mirino, dillo come incertezza
