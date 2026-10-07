@@ -56,6 +56,16 @@ della località. Le richieste malformate ricevono una risposta di errore.
 I JSON non si modificano a mano — vedi [`dev/README.md`](dev/README.md) per
 rigenerarli e per la suite di test che gira senza n8n e senza consumare quota.
 
+## Skill per Claude Code
+
+[`.claude/skills/bollettino-meteo/`](.claude/skills/bollettino-meteo/SKILL.md)
+fa lo stesso lavoro del Workflow B senza n8n: riusa i nodi Code di `dev/js/`,
+aggiunge la lettura delle mappe BOLAM e MOLOCH del
+[visualizzatore modelli ARPAL](https://cmi-servizi.arpal.liguria.it/visualizzatore-modelli/)
+e lascia a Claude la parte dell'Agente Capo. Dentro questo repo è già attiva;
+per averla in ogni progetto copia la cartella in `~/.claude/skills/`: al primo
+uso scarica da sé questo repository nella cache.
+
 ## Licenza
 
 Il codice è distribuito con licenza MIT: vedi [LICENSE](LICENSE). I dati di
